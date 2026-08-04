@@ -1,0 +1,223 @@
+const treeEl = document.getElementById('tree');
+const emptyEl = document.getElementById('empty');
+const alertsEl = document.getElementById('alerts');
+const searchEl = document.getElementById('search');
+const dialog = document.getElementById('editor');
+const form = document.getElementById('editor-form');
+
+const collapsed = new Set(JSON.parse(localStorage.getItem('collapsed') || '[]'));
+let tree = [];
+
+function saveCollapsed() {
+  localStorage.setItem('collapsed', JSON.stringify([...collapsed]));
+}
+
+async function api(path, options) {
+  const res = await fetch(`/api/items${path}`, {
+    headers: { 'Content-Type': 'application/json' },
+    ...options,
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || 'Lỗi không xác định');
+  return data;
+}
+
+function daysUntil(dateStr) {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  return Math.round((new Date(`${dateStr}T00:00:00`) - today) / 86400000);
+}
+
+function el(tag, props = {}, children = []) {
+  const node = Object.assign(document.createElement(tag), props);
+  for (const child of children) if (child) node.append(child);
+  return node;
+}
+
+function renderNode(item, query) {
+  const hasChildren = item.children.length > 0;
+  const isCollapsed = collapsed.has(item.id);
+  const matches = query && item.name.toLowerCase().includes(query);
+
+  const twisty = el('button', {
+    className: hasChildren ? 'twisty' : 'twisty leaf',
+    textContent: isCollapsed ? '▶' : '▼',
+    title: isCollapsed ? 'Mở' : 'Thu',
+  });
+  twisty.addEventListener('click', () => {
+    if (!hasChildren) return;
+    collapsed.has(item.id) ? collapsed.delete(item.id) : collapsed.add(item.id);
+    saveCollapsed();
+    render();
+  });
+
+  const parts = [twisty, el('span', { className: 'name', textContent: item.name })];
+
+  if (item.quantity > 0 || item.unit) {
+    parts.push(el('span', {
+      className: item.quantity > 0 ? 'badge' : 'badge zero',
+      textContent: `${item.quantity}${item.unit ? ` ${item.unit}` : ''}`,
+    }));
+  }
+
+  if (item.expires_at) {
+    const left = daysUntil(item.expires_at);
+    parts.push(el('span', {
+      className: left <= 7 ? 'badge date soon' : 'badge date',
+      textContent: left < 0 ? `quá hạn ${-left}n` : `còn ${left}n`,
+      title: `Hạn dùng ${item.expires_at}`,
+    }));
+  }
+
+  if (item.note) parts.push(el('span', { className: 'note', textContent: item.note }));
+
+  parts.push(el('div', { className: 'spacer' }));
+
+  const ops = el('div', { className: 'ops' });
+  const buttons = [
+    ['−', 'Bớt 1', () => api(`/${item.id}/adjust`, { method: 'POST', body: JSON.stringify({ delta: -1 }) })],
+    ['+', 'Thêm 1', () => api(`/${item.id}/adjust`, { method: 'POST', body: JSON.stringify({ delta: 1 }) })],
+    ['＋mục', 'Thêm mục con', () => openEditor({ parentId: item.id })],
+    ['Sửa', 'Sửa mục', () => openEditor({ item })],
+  ];
+  for (const [label, title, action] of buttons) {
+    const button = el('button', { textContent: label, title });
+    button.addEventListener('click', () => run(action));
+    ops.append(button);
+  }
+
+  const del = el('button', { className: 'del', textContent: '✕', title: 'Xoá mục' });
+  del.addEventListener('click', () => {
+    const warning = hasChildren ? `\n\nCả ${item.children.length} mục con cũng bị xoá.` : '';
+    if (confirm(`Xoá "${item.name}"?${warning}`)) {
+      run(() => api(`/${item.id}`, { method: 'DELETE' }));
+    }
+  });
+  ops.append(del);
+  parts.push(ops);
+
+  const row = el('div', { className: matches ? 'node match' : 'node' }, parts);
+  const li = el('li', { className: hasChildren && isCollapsed ? 'collapsed' : '' }, [row]);
+
+  if (hasChildren) {
+    li.append(el('ul', {}, item.children.map((child) => renderNode(child, query))));
+  }
+  return li;
+}
+
+function filterTree(nodes, query) {
+  return nodes
+    .map((node) => {
+      const children = filterTree(node.children, query);
+      const matches = node.name.toLowerCase().includes(query);
+      return matches || children.length ? { ...node, children } : null;
+    })
+    .filter(Boolean);
+}
+
+function renderAlerts() {
+  const flat = [];
+  (function walk(nodes) {
+    for (const node of nodes) {
+      flat.push(node);
+      walk(node.children);
+    }
+  })(tree);
+
+  const soon = flat
+    .filter((item) => item.expires_at && daysUntil(item.expires_at) <= 7)
+    .sort((a, b) => a.expires_at.localeCompare(b.expires_at));
+
+  alertsEl.replaceChildren(
+    ...soon.map((item) => {
+      const left = daysUntil(item.expires_at);
+      return el('div', {
+        className: left < 0 ? 'alert overdue' : 'alert',
+        textContent: left < 0
+          ? `${item.name} — quá hạn ${-left} ngày (${item.expires_at})`
+          : `${item.name} — còn ${left} ngày (${item.expires_at})`,
+      });
+    })
+  );
+}
+
+function render() {
+  const query = searchEl.value.trim().toLowerCase();
+  const visible = query ? filterTree(tree, query) : tree;
+
+  treeEl.replaceChildren(...visible.map((node) => renderNode(node, query)));
+  emptyEl.hidden = visible.length > 0;
+  if (query && visible.length === 0) emptyEl.textContent = 'Không tìm thấy mục nào.';
+  renderAlerts();
+}
+
+async function load() {
+  tree = await api('');
+  render();
+}
+
+async function run(action) {
+  try {
+    await action();
+    await load();
+  } catch (err) {
+    alert(err.message);
+  }
+}
+
+let editing = null;
+
+function openEditor({ item = null, parentId = null } = {}) {
+  editing = { item, parentId };
+  document.getElementById('editor-title').textContent = item ? 'Sửa mục' : 'Thêm mục';
+  form.reset();
+  if (item) {
+    form.name.value = item.name;
+    form.quantity.value = item.quantity;
+    form.unit.value = item.unit;
+    form.expires_at.value = item.expires_at || '';
+    form.note.value = item.note;
+  }
+  dialog.showModal();
+  form.name.focus();
+}
+
+form.addEventListener('submit', (event) => {
+  if (event.submitter?.value !== 'save') return;
+  const body = {
+    name: form.name.value,
+    quantity: Number(form.quantity.value || 0),
+    unit: form.unit.value,
+    expires_at: form.expires_at.value || null,
+    note: form.note.value,
+  };
+  const { item, parentId } = editing;
+  run(() =>
+    item
+      ? api(`/${item.id}`, { method: 'PATCH', body: JSON.stringify(body) })
+      : api('', { method: 'POST', body: JSON.stringify({ ...body, parent_id: parentId }) })
+  );
+});
+
+document.getElementById('add-root').addEventListener('click', () => openEditor());
+
+document.getElementById('expand-all').addEventListener('click', () => {
+  collapsed.clear();
+  saveCollapsed();
+  render();
+});
+
+document.getElementById('collapse-all').addEventListener('click', () => {
+  (function walk(nodes) {
+    for (const node of nodes) {
+      if (node.children.length) collapsed.add(node.id);
+      walk(node.children);
+    }
+  })(tree);
+  saveCollapsed();
+  render();
+});
+
+searchEl.addEventListener('input', render);
+
+load().catch((err) => alert(err.message));

@@ -1,0 +1,216 @@
+:root {
+  --amber: #f0a90c;
+  --amber-soft: #fdf3dc;
+  --bg: #fbfbfa;
+  --surface: #ffffff;
+  --text: #1f2328;
+  --muted: #6b7280;
+  --line: #e5e3de;
+  --danger: #c2410c;
+  --radius: 8px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --amber: #f5b93a;
+    --amber-soft: #3a2f14;
+    --bg: #16181c;
+    --surface: #1e2126;
+    --text: #e8e6e3;
+    --muted: #9ca3af;
+    --line: #32363d;
+    --danger: #f97316;
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  padding: 24px 20px 64px;
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+header, main { max-width: 900px; margin: 0 auto; }
+
+h1 {
+  margin: 0 0 16px;
+  font-size: 22px;
+  font-weight: 650;
+}
+
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+#search {
+  flex: 1 1 220px;
+  min-width: 0;
+}
+
+input, textarea, button {
+  font: inherit;
+  color: inherit;
+  border-radius: var(--radius);
+}
+
+input, textarea {
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  width: 100%;
+}
+
+input:focus-visible, textarea:focus-visible, button:focus-visible {
+  outline: 2px solid var(--amber);
+  outline-offset: 1px;
+}
+
+button {
+  padding: 7px 12px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+button:hover { border-color: var(--amber); }
+
+button.primary {
+  background: var(--amber);
+  border-color: var(--amber);
+  color: #241a00;
+  font-weight: 600;
+}
+
+.alerts { display: flex; flex-direction: column; gap: 6px; }
+
+.alert {
+  padding: 8px 12px;
+  border-radius: var(--radius);
+  background: var(--amber-soft);
+  border-left: 3px solid var(--amber);
+  font-size: 14px;
+}
+
+.alert.overdue { border-left-color: var(--danger); }
+
+.tree, .tree ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.tree ul {
+  margin-left: 13px;
+  padding-left: 15px;
+  border-left: 2px solid var(--amber);
+}
+
+.tree li.collapsed > ul { display: none; }
+
+.node {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  margin: 2px 0;
+  border-radius: var(--radius);
+  background: var(--surface);
+  border: 1px solid var(--line);
+}
+
+.node:hover { border-color: var(--amber); }
+.node.match { background: var(--amber-soft); }
+
+.twisty {
+  width: 20px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  font-size: 11px;
+  text-align: center;
+}
+
+.twisty.leaf { visibility: hidden; }
+
+.name { font-weight: 500; }
+
+.badge {
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--amber-soft);
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.badge.zero { color: var(--muted); background: none; border: 1px solid var(--line); }
+.badge.date { font-size: 12px; color: var(--muted); }
+.badge.date.soon { color: var(--danger); font-weight: 600; }
+
+.note {
+  color: var(--muted);
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.spacer { flex: 1; }
+
+.node .ops { display: flex; gap: 4px; opacity: 0; }
+.node:hover .ops, .node:focus-within .ops { opacity: 1; }
+
+.ops button {
+  padding: 2px 8px;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.ops button.del:hover { border-color: var(--danger); color: var(--danger); }
+
+.empty { color: var(--muted); }
+
+dialog {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+  color: var(--text);
+  padding: 20px;
+  width: min(380px, calc(100vw - 32px));
+}
+
+dialog::backdrop { background: rgba(0, 0, 0, .4); }
+
+dialog h2 { margin: 0 0 14px; font-size: 17px; }
+
+dialog label {
+  display: block;
+  margin-bottom: 12px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+dialog label input, dialog label textarea { margin-top: 4px; color: var(--text); }
+
+.row { display: flex; gap: 10px; }
+.row label { flex: 1; }
+
+.actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+@media (max-width: 560px) {
+  .node { flex-wrap: wrap; }
+  .node .ops { opacity: 1; }
+  .note { flex-basis: 100%; }
+}
