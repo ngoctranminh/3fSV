@@ -1,0 +1,28 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(TZ=Asia/Ho_Chi_Minh node -e ' *)",
+      "Bash(TZ=Asia/Ho_Chi_Minh node --input-type=module -e ' *)",
+      "Bash(curl -sf localhost:3000/health)",
+      "Bash(curl -s localhost:3000/api/summary)",
+      "Bash(python3 -m json.tool)",
+      "Bash(curl -s 'localhost:3000/api/stats/value-history?days=7')",
+      "Bash(curl -s localhost:3000/api/alerts)",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\(f'Tổng: {len\\(d\\)} cảnh báo'\\); print\\(json.dumps\\(d[:3], ensure_ascii=False, indent=2\\)\\)\")",
+      "Bash(curl -s 'localhost:3000/api/transactions?limit=2')",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\(f\\\\\"total={d['total']}\\\\\"\\); print\\(json.dumps\\(d['items'], ensure_ascii=False, indent=2\\)\\)\")",
+      "Bash(python3 -c \"import json,sys; t=json.load\\(sys.stdin\\)['items'][0]; print\\(f\\\\\"  giao dịch ghi: kind={t['kind']} quantity={t['quantity']} source={t['source']}\\\\\"\\)\")",
+      "Bash(python3 -c ' *)",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\(f'  {len\\(d\\)} nhóm gốc, nhóm đầu \\\\\"{d[0][\\\\\"name\\\\\"]}\\\\\" có {len\\(d[0][\\\\\"children\\\\\"]\\)} mục con'\\)\")",
+      "Bash(curl -s -o /dev/null -w \"  GET /  → HTTP %{http_code}\\\\n\" localhost:3000/)",
+      "Bash(curl -s -o /dev/null -w \"  GET /api.html → HTTP %{http_code}\\\\n\" localhost:3000/api.html)",
+      "Bash(node -e ' *)",
+      "Bash(cp data/kho.db /tmp/rebuild-test.db)",
+      "Bash(cp data/kho.db \"data/kho.db.pre-tz-$\\(date +%H%M%S\\)\")",
+      "Bash(node -e \"import\\('./src/db.js'\\).then\\(\\(\\)=>console.log\\('  xong'\\)\\)\")",
+      "Bash(node -e \"import\\('./src/db.js'\\).then\\(\\(\\)=>console.log\\('  lần 2: OK'\\)\\)\")",
+      "Bash(node -e \"import\\('./src/db.js'\\).then\\(\\(\\)=>console.log\\('  lần 3: OK'\\)\\)\")",
+      "Bash(git add *)"
+    ]
+  }
+}

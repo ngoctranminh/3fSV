@@ -1,13 +1,14 @@
 import { Router } from 'express';
-import { db } from '../db.js';
+import { db, tx, NOW } from '../db.js';
+import { recordTransaction } from './transactions.js';
 
 const router = Router();
 
 const selectAll = db.prepare('SELECT * FROM items ORDER BY position, id');
 const selectOne = db.prepare('SELECT * FROM items WHERE id = ?');
 const insertItem = db.prepare(`
-  INSERT INTO items (parent_id, name, quantity, unit, expires_at, note, position)
-  VALUES (?, ?, ?, ?, ?, ?, ?)
+  INSERT INTO items (parent_id, name, quantity, unit, expires_at, note, position, unit_price, min_quantity)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 `);
 const deleteItem = db.prepare('DELETE FROM items WHERE id = ?');
 const nextPosition = db.prepare(
@@ -55,6 +56,15 @@ function parseFields(body, { partial }) {
   if (body.unit !== undefined) fields.unit = String(body.unit).trim();
   if (body.note !== undefined) fields.note = String(body.note).trim();
 
+  for (const key of ['unit_price', 'min_quantity']) {
+    if (body[key] === undefined) continue;
+    const value = Number(body[key]);
+    if (!Number.isFinite(value) || value < 0) {
+      throw Object.assign(new Error(`"${key}" phải là số không âm`), { status: 400 });
+    }
+    fields[key] = value;
+  }
+
   if (body.expires_at !== undefined) {
     const value = body.expires_at;
     if (value === null || value === '') {
@@ -92,7 +102,7 @@ router.get('/expiring', (req, res) => {
     .prepare(
       `SELECT * FROM items
        WHERE expires_at IS NOT NULL
-         AND date(expires_at) <= date('now', '+' || ? || ' days')
+         AND date(expires_at) <= date('now', 'localtime', '+' || ? || ' days')
        ORDER BY expires_at`
     )
     .all(days);
@@ -115,17 +125,36 @@ router.post('/', (req, res, next) => {
     const fields = parseFields(body, { partial: false });
     const parentId = resolveParent(body.parent_id);
     const { pos } = nextPosition.get(parentId);
+    const quantity = fields.quantity ?? 0;
+    const unitPrice = fields.unit_price ?? 0;
 
-    const { lastInsertRowid } = insertItem.run(
-      parentId,
-      fields.name,
-      fields.quantity ?? 0,
-      fields.unit ?? '',
-      fields.expires_at ?? null,
-      fields.note ?? '',
-      pos
-    );
-    res.status(201).json(selectOne.get(Number(lastInsertRowid)));
+    const id = tx(() => {
+      // Chèn với quantity 0 rồi ghi sổ tồn đầu, để recordTransaction không cộng dồn hai lần
+      const { lastInsertRowid } = insertItem.run(
+        parentId,
+        fields.name,
+        0,
+        fields.unit ?? '',
+        fields.expires_at ?? null,
+        fields.note ?? '',
+        pos,
+        unitPrice,
+        fields.min_quantity ?? 0
+      );
+      const newId = Number(lastInsertRowid);
+      if (quantity > 0) {
+        recordTransaction({
+          itemId: newId,
+          delta: quantity,
+          source: 'initial',
+          unitPrice: unitPrice > 0 ? unitPrice : null,
+          note: 'Tồn đầu',
+        });
+      }
+      return newId;
+    });
+
+    res.status(201).json(selectOne.get(id));
   } catch (err) {
     next(err);
   }
@@ -134,10 +163,15 @@ router.post('/', (req, res, next) => {
 router.patch('/:id', (req, res, next) => {
   try {
     const id = Number(req.params.id);
-    if (!selectOne.get(id)) return res.status(404).json({ error: 'Mục không tồn tại' });
+    const existing = selectOne.get(id);
+    if (!existing) return res.status(404).json({ error: 'Mục không tồn tại' });
 
     const body = req.body ?? {};
     const fields = parseFields(body, { partial: true });
+
+    // quantity không ghi trực tiếp: đi qua sổ giao dịch để biểu đồ không lệch
+    const nextQuantity = fields.quantity;
+    delete fields.quantity;
 
     if (body.parent_id !== undefined) {
       const parentId = resolveParent(body.parent_id);
@@ -149,11 +183,24 @@ router.patch('/:id', (req, res, next) => {
     }
 
     const keys = Object.keys(fields);
-    if (keys.length === 0) return res.json(selectOne.get(id));
+    if (keys.length === 0 && nextQuantity === undefined) return res.json(existing);
 
-    const assignments = keys.map((key) => `${key} = ?`).join(', ');
-    db.prepare(`UPDATE items SET ${assignments}, updated_at = datetime('now') WHERE id = ?`)
-      .run(...keys.map((key) => fields[key]), id);
+    tx(() => {
+      if (keys.length > 0) {
+        const assignments = keys.map((key) => `${key} = ?`).join(', ');
+        db.prepare(`UPDATE items SET ${assignments}, updated_at = ${NOW} WHERE id = ?`)
+          .run(...keys.map((key) => fields[key]), id);
+      }
+      const delta = nextQuantity === undefined ? 0 : nextQuantity - existing.quantity;
+      if (delta !== 0) {
+        recordTransaction({
+          itemId: id,
+          delta,
+          source: 'edit',
+          note: 'Sửa số lượng trực tiếp',
+        });
+      }
+    });
 
     res.json(selectOne.get(id));
   } catch (err) {
@@ -161,20 +208,34 @@ router.patch('/:id', (req, res, next) => {
   }
 });
 
-router.post('/:id/adjust', (req, res) => {
-  const id = Number(req.params.id);
-  const item = selectOne.get(id);
-  if (!item) return res.status(404).json({ error: 'Mục không tồn tại' });
+router.post('/:id/adjust', (req, res, next) => {
+  try {
+    const id = Number(req.params.id);
+    const item = selectOne.get(id);
+    if (!item) return res.status(404).json({ error: 'Mục không tồn tại' });
 
-  const delta = Number(req.body?.delta);
-  if (!Number.isFinite(delta)) {
-    return res.status(400).json({ error: '"delta" phải là số' });
+    const delta = Number(req.body?.delta);
+    if (!Number.isFinite(delta)) {
+      return res.status(400).json({ error: '"delta" phải là số' });
+    }
+
+    // Clamp về 0 rồi ghi sổ delta THỰC TẾ đã áp dụng, không phải delta yêu cầu
+    const applied = Math.max(0, item.quantity + delta) - item.quantity;
+    if (applied !== 0) {
+      tx(() =>
+        recordTransaction({
+          itemId: id,
+          delta: applied,
+          source: 'adjust',
+          note: applied > 0 ? 'Thêm nhanh' : 'Bớt nhanh',
+        })
+      );
+    }
+
+    res.json(selectOne.get(id));
+  } catch (err) {
+    next(err);
   }
-
-  const quantity = Math.max(0, item.quantity + delta);
-  db.prepare("UPDATE items SET quantity = ?, updated_at = datetime('now') WHERE id = ?")
-    .run(quantity, id);
-  res.json(selectOne.get(id));
 });
 
 router.delete('/:id', (req, res) => {

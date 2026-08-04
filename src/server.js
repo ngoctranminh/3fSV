@@ -2,6 +2,8 @@ import express from 'express';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import itemsRouter from './routes/items.js';
+import transactionsRouter from './routes/transactions.js';
+import statsRouter from './routes/stats.js';
 
 const rootDir = join(dirname(fileURLToPath(import.meta.url)), '..');
 const app = express();
@@ -27,6 +29,8 @@ app.get('/health', (req, res) => {
 });
 
 app.use('/api/items', itemsRouter);
+app.use('/api/transactions', transactionsRouter);
+app.use('/api', statsRouter);
 
 app.use((req, res) => {
   res.status(404).json({ error: 'Not Found', path: req.originalUrl });

@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bảng thử API — Quản lý kho</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="wide">
+  <h1>Bảng thử API</h1>
+  <p class="hint">Chọn một endpoint bên trái, sửa đường dẫn hoặc nội dung rồi bấm Gửi. <a href="index.html">← Về trang kho</a></p>
+  <p class="hint note-put">Lưu ý: API sửa mục dùng <code>PATCH</code>, chưa có <code>PUT</code> — chọn PUT sẽ nhận 404.</p>
+</header>
+
+<main class="wide">
+  <div class="console">
+    <aside>
+      <h2 class="side-title">Endpoint</h2>
+      <div id="endpoints" class="endpoints"></div>
+    </aside>
+
+    <section>
+      <div class="reqbar">
+        <select id="method" aria-label="Phương thức">
+          <option>GET</option>
+          <option>POST</option>
+          <option>PUT</option>
+          <option>PATCH</option>
+          <option>DELETE</option>
+        </select>
+        <input id="path" value="/api/items" aria-label="Đường dẫn" autocomplete="off" spellcheck="false">
+        <button id="send" class="primary">Gửi</button>
+      </div>
+
+      <label class="body-label">
+        Nội dung JSON
+        <textarea id="body" rows="8" spellcheck="false" placeholder='{ "name": "Gạo", "quantity": 2, "unit": "kg" }'></textarea>
+      </label>
+
+      <div id="status" class="status" hidden>
+        <span id="code" class="code"></span>
+        <span id="meta" class="meta"></span>
+      </div>
+      <pre id="response" class="response" hidden></pre>
+    </section>
+  </div>
+</main>
+
+<script src="api.js"></script>
+</body>
+</html>
