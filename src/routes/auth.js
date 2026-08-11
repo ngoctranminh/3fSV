@@ -1,14 +1,26 @@
 import { Router } from 'express';
 import {
   clearSessionCookie,
+  createUser,
   createSession,
   destroySession,
   requireAuth,
+  requireAdmin,
   setSessionCookie,
   verifyCredentials,
 } from '../auth.js';
 
 const router = Router();
+
+router.post('/register', requireAuth, requireAdmin, (req, res, next) => {
+  try {
+    const username = typeof req.body?.username === 'string' ? req.body.username.trim() : '';
+    const user = createUser(username, req.body?.password);
+    res.status(201).json({ user });
+  } catch (err) {
+    next(err);
+  }
+});
 
 router.post('/login', (req, res, next) => {
   try {

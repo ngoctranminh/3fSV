@@ -39,6 +39,7 @@ async function loadCurrentUser() {
   const data = await res.json();
   if (!res.ok) throw new Error(data.error || 'Không lấy được tài khoản đăng nhập');
   document.getElementById('current-user').textContent = data.user.username;
+  document.getElementById('manage-users').hidden = data.user.role !== 'admin';
   return true;
 }
 

@@ -174,10 +174,18 @@ db.exec(`
     username      TEXT    NOT NULL COLLATE NOCASE UNIQUE,
     password_salt TEXT    NOT NULL,
     password_hash TEXT    NOT NULL,
+    role          TEXT    NOT NULL DEFAULT 'user' CHECK (role IN ('admin', 'user')),
     created_at    TEXT    NOT NULL DEFAULT (${NOW}),
     updated_at    TEXT    NOT NULL DEFAULT (${NOW})
   )
 `);
+
+const userColumns = new Set(
+  db.prepare('PRAGMA table_info(users)').all().map((column) => column.name)
+);
+if (!userColumns.has('role')) {
+  db.exec("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user' CHECK (role IN ('admin', 'user'))");
+}
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS sessions (

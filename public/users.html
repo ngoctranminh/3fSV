@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Quản lý tài khoản · Quản lý kho</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>Quản lý tài khoản</h1>
+  <div class="toolbar">
+    <a href="/" class="api-link">← Quay lại kho</a>
+    <span id="current-user" class="current-user"></span>
+    <button id="logout" type="button">Đăng xuất</button>
+  </div>
+</header>
+
+<main class="users-layout">
+  <section class="user-panel">
+    <h2>Tạo tài khoản</h2>
+    <form id="create-user-form">
+      <label>Tài khoản<input name="username" required minlength="3" maxlength="50" pattern="[a-zA-Z0-9._-]+" autocomplete="off"></label>
+      <label>Mật khẩu<input name="password" type="password" required minlength="8" autocomplete="new-password"></label>
+      <label>Nhập lại mật khẩu<input name="confirm_password" type="password" required minlength="8" autocomplete="new-password"></label>
+      <p id="form-message" class="form-message" role="status" hidden></p>
+      <button class="primary" type="submit">Tạo tài khoản</button>
+    </form>
+  </section>
+
+  <section class="user-panel user-list-panel">
+    <div class="panel-heading">
+      <h2>Danh sách tài khoản</h2>
+      <span id="user-count" class="current-user"></span>
+    </div>
+    <div id="user-list" class="user-list"></div>
+  </section>
+</main>
+
+<script src="users.js"></script>
+</body>
+</html>

@@ -263,6 +263,63 @@ dialog label input, dialog label textarea { margin-top: 4px; color: var(--text);
 .login-card button { width: 100%; margin-top: 4px; }
 .login-error { margin: 0 0 12px; color: var(--danger); font-size: 13px; }
 
+.users-layout {
+  display: grid;
+  grid-template-columns: minmax(240px, 300px) 1fr;
+  gap: 20px;
+  align-items: start;
+}
+
+.user-panel {
+  padding: 18px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+}
+
+.user-panel h2 { margin: 0 0 14px; font-size: 16px; }
+.user-panel label { display: block; margin-bottom: 12px; color: var(--muted); font-size: 13px; }
+.user-panel label input { margin-top: 4px; color: var(--text); }
+.user-panel form > button { width: 100%; }
+
+.panel-heading { display: flex; justify-content: space-between; gap: 12px; }
+.user-list { display: flex; flex-direction: column; }
+
+.user-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 0;
+  border-top: 1px solid var(--line);
+}
+
+.user-row:first-child { border-top: 0; padding-top: 0; }
+.user-details { flex: 1; display: flex; align-items: center; flex-wrap: wrap; gap: 6px; min-width: 0; }
+.user-details strong { overflow-wrap: anywhere; }
+.user-details small { flex-basis: 100%; color: var(--muted); }
+
+.role-badge, .current-badge {
+  padding: 1px 6px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.role-badge.admin { border-color: var(--amber); color: var(--text); background: var(--amber-soft); }
+.form-message { margin: 0 0 12px; font-size: 13px; }
+.form-message.error { color: var(--danger); }
+.form-message.success { color: #15803d; }
+.user-row button.del:not(:disabled):hover { border-color: var(--danger); color: var(--danger); }
+
+@media (prefers-color-scheme: dark) {
+  .form-message.success { color: #4ade80; }
+}
+
+@media (max-width: 680px) {
+  .users-layout { grid-template-columns: 1fr; }
+}
+
 header.wide, main.wide { max-width: 1100px; }
 
 .hint { margin: 0 0 20px; color: var(--muted); font-size: 14px; }

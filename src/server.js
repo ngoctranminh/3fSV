@@ -1,16 +1,22 @@
 import express from 'express';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { requireAuth } from './auth.js';
+import { bootstrapUsersFromEnv, requireAuth } from './auth.js';
 import authRouter from './routes/auth.js';
 import itemsRouter from './routes/items.js';
 import transactionsRouter from './routes/transactions.js';
 import documentsRouter from './routes/documents.js';
 import statsRouter from './routes/stats.js';
+import usersRouter from './routes/users.js';
 
 const rootDir = join(dirname(fileURLToPath(import.meta.url)), '..');
 const app = express();
 const PORT = process.env.PORT || 3000;
+const bootstrappedUsers = bootstrapUsersFromEnv();
+
+if (bootstrappedUsers.length > 0) {
+  console.log(`Đã khởi tạo ${bootstrappedUsers.length} tài khoản ban đầu.`);
+}
 
 app.use(express.json());
 app.use(express.static(join(rootDir, 'public')));
@@ -33,6 +39,7 @@ app.get('/health', (req, res) => {
 
 app.use('/api/auth', authRouter);
 app.use('/api', requireAuth);
+app.use('/api/users', usersRouter);
 app.use('/api/items', itemsRouter);
 app.use('/api/transactions', transactionsRouter);
 app.use('/api/documents', documentsRouter);

@@ -170,6 +170,26 @@ const PRESETS = [
     label: 'Kiểm tra server',
     desc: 'Trạng thái và thời gian server đã chạy.',
   },
+  {
+    method: 'POST',
+    path: '/api/auth/register',
+    label: 'Tạo tài khoản',
+    desc: 'Chỉ quản trị viên đang đăng nhập được tạo tài khoản mới.',
+    body: { username: 'nhanvien', password: 'mat-khau-moi' },
+  },
+  {
+    method: 'GET',
+    path: '/api/users',
+    label: 'Danh sách tài khoản',
+    desc: 'Chỉ quản trị viên được xem.',
+  },
+  {
+    method: 'DELETE',
+    path: '/api/users/2',
+    label: 'Xóa tài khoản',
+    desc: 'Xóa tài khoản và đăng xuất toàn bộ phiên của tài khoản đó.',
+    danger: true,
+  },
 ];
 
 function el(tag, props = {}, children = []) {
