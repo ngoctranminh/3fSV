@@ -5,6 +5,10 @@ const searchEl = document.getElementById('search');
 const dialog = document.getElementById('editor');
 const form = document.getElementById('editor-form');
 
+function formField(name) {
+  return form.elements.namedItem(name);
+}
+
 const collapsed = new Set(JSON.parse(localStorage.getItem('collapsed') || '[]'));
 let tree = [];
 
@@ -18,14 +22,38 @@ async function api(path, options) {
     ...options,
   });
   const data = await res.json();
+  if (res.status === 401) {
+    location.replace('/login.html');
+    throw new Error('Bạn cần đăng nhập');
+  }
   if (!res.ok) throw new Error(data.error || 'Lỗi không xác định');
   return data;
+}
+
+async function loadCurrentUser() {
+  const res = await fetch('/api/auth/me');
+  if (res.status === 401) {
+    location.replace('/login.html');
+    return false;
+  }
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || 'Không lấy được tài khoản đăng nhập');
+  document.getElementById('current-user').textContent = data.user.username;
+  return true;
 }
 
 function daysUntil(dateStr) {
   const today = new Date();
   today.setHours(0, 0, 0, 0);
   return Math.round((new Date(`${dateStr}T00:00:00`) - today) / 86400000);
+}
+
+function markContainers(nodes) {
+  for (const node of nodes) {
+    markContainers(node.children);
+    // Nhóm gốc và mọi nút có con chỉ là thư mục, không phải mặt hàng tồn kho.
+    node.is_container = node.parent_id === null || node.children.length > 0;
+  }
 }
 
 function el(tag, props = {}, children = []) {
@@ -36,6 +64,7 @@ function el(tag, props = {}, children = []) {
 
 function renderNode(item, query) {
   const hasChildren = item.children.length > 0;
+  const isContainer = item.is_container;
   const isCollapsed = collapsed.has(item.id);
   const matches = query && item.name.toLowerCase().includes(query);
 
@@ -53,14 +82,14 @@ function renderNode(item, query) {
 
   const parts = [twisty, el('span', { className: 'name', textContent: item.name })];
 
-  if (item.quantity > 0 || item.unit) {
+  if (!isContainer && (item.quantity > 0 || item.unit)) {
     parts.push(el('span', {
       className: item.quantity > 0 ? 'badge' : 'badge zero',
       textContent: `${item.quantity}${item.unit ? ` ${item.unit}` : ''}`,
     }));
   }
 
-  if (item.expires_at) {
+  if (!isContainer && item.expires_at) {
     const left = daysUntil(item.expires_at);
     parts.push(el('span', {
       className: left <= 7 ? 'badge date soon' : 'badge date',
@@ -74,12 +103,17 @@ function renderNode(item, query) {
   parts.push(el('div', { className: 'spacer' }));
 
   const ops = el('div', { className: 'ops' });
-  const buttons = [
-    ['−', 'Bớt 1', () => api(`/${item.id}/adjust`, { method: 'POST', body: JSON.stringify({ delta: -1 }) })],
-    ['+', 'Thêm 1', () => api(`/${item.id}/adjust`, { method: 'POST', body: JSON.stringify({ delta: 1 }) })],
+  const buttons = [];
+  if (!isContainer) {
+    buttons.push(
+      ['−', 'Bớt 1', () => api(`/${item.id}/adjust`, { method: 'POST', body: JSON.stringify({ delta: -1 }) })],
+      ['+', 'Thêm 1', () => api(`/${item.id}/adjust`, { method: 'POST', body: JSON.stringify({ delta: 1 }) })]
+    );
+  }
+  buttons.push(
     ['＋mục', 'Thêm mục con', () => openEditor({ parentId: item.id })],
-    ['Sửa', 'Sửa mục', () => openEditor({ item })],
-  ];
+    ['Sửa', isContainer ? 'Sửa thư mục' : 'Sửa mục', () => openEditor({ item })]
+  );
   for (const [label, title, action] of buttons) {
     const button = el('button', { textContent: label, title });
     button.addEventListener('click', () => run(action));
@@ -96,7 +130,9 @@ function renderNode(item, query) {
   ops.append(del);
   parts.push(ops);
 
-  const row = el('div', { className: matches ? 'node match' : 'node' }, parts);
+  const row = el('div', {
+    className: `${matches ? 'node match' : 'node'}${isContainer ? ' container' : ''}`,
+  }, parts);
   const li = el('li', { className: hasChildren && isCollapsed ? 'collapsed' : '' }, [row]);
 
   if (hasChildren) {
@@ -125,7 +161,7 @@ function renderAlerts() {
   })(tree);
 
   const soon = flat
-    .filter((item) => item.expires_at && daysUntil(item.expires_at) <= 7)
+    .filter((item) => !item.is_container && item.expires_at && daysUntil(item.expires_at) <= 7)
     .sort((a, b) => a.expires_at.localeCompare(b.expires_at));
 
   alertsEl.replaceChildren(
@@ -153,6 +189,7 @@ function render() {
 
 async function load() {
   tree = await api('');
+  markContainers(tree);
   render();
 }
 
@@ -168,30 +205,39 @@ async function run(action) {
 let editing = null;
 
 function openEditor({ item = null, parentId = null } = {}) {
-  editing = { item, parentId };
-  document.getElementById('editor-title').textContent = item ? 'Sửa mục' : 'Thêm mục';
+  const isContainer = item ? item.is_container : parentId === null;
+  editing = { item, parentId, isContainer };
+  document.getElementById('editor-title').textContent = item
+    ? `Sửa ${isContainer ? 'thư mục' : 'mục'}`
+    : `Thêm ${isContainer ? 'thư mục' : 'mục'}`;
   form.reset();
+  document.getElementById('stock-fields').hidden = isContainer;
+  document.getElementById('expiry-field').hidden = isContainer;
   if (item) {
-    form.name.value = item.name;
-    form.quantity.value = item.quantity;
-    form.unit.value = item.unit;
-    form.expires_at.value = item.expires_at || '';
-    form.note.value = item.note;
+    formField('name').value = item.name;
+    if (!isContainer) {
+      formField('quantity').value = item.quantity;
+      formField('unit').value = item.unit;
+      formField('expires_at').value = item.expires_at || '';
+    }
+    formField('note').value = item.note;
   }
   dialog.showModal();
-  form.name.focus();
+  formField('name').focus();
 }
 
 form.addEventListener('submit', (event) => {
   if (event.submitter?.value !== 'save') return;
   const body = {
-    name: form.name.value,
-    quantity: Number(form.quantity.value || 0),
-    unit: form.unit.value,
-    expires_at: form.expires_at.value || null,
-    note: form.note.value,
+    name: formField('name').value,
+    note: formField('note').value,
   };
-  const { item, parentId } = editing;
+  const { item, parentId, isContainer } = editing;
+  if (!isContainer) {
+    body.quantity = Number(formField('quantity').value || 0);
+    body.unit = formField('unit').value;
+    body.expires_at = formField('expires_at').value || null;
+  }
   run(() =>
     item
       ? api(`/${item.id}`, { method: 'PATCH', body: JSON.stringify(body) })
@@ -220,4 +266,16 @@ document.getElementById('collapse-all').addEventListener('click', () => {
 
 searchEl.addEventListener('input', render);
 
-load().catch((err) => alert(err.message));
+document.getElementById('logout').addEventListener('click', async () => {
+  try {
+    await fetch('/api/auth/logout', { method: 'POST' });
+  } finally {
+    location.replace('/login.html');
+  }
+});
+
+async function start() {
+  if (await loadCurrentUser()) await load();
+}
+
+start().catch((err) => alert(err.message));

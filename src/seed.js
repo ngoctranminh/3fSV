@@ -147,8 +147,18 @@ const insert = db.prepare(`
 `);
 
 const insertTx = db.prepare(`
-  INSERT INTO transactions (item_id, kind, source, quantity, unit_price, note, occurred_at)
-  VALUES (?, ?, ?, ?, ?, ?, datetime('now', 'localtime', '-' || ? || ' days'))
+  INSERT INTO transactions (item_id, kind, source, quantity, unit_price, note, occurred_at, document_id)
+  VALUES (?, ?, ?, ?, ?, ?, datetime('now', 'localtime', '-' || ? || ' days'), ?)
+`);
+
+const insertDocument = db.prepare(`
+  INSERT INTO documents (code, type, subtype, party, total_value, note, created_by, occurred_at)
+  VALUES (?, ?, ?, ?, ?, ?, 'Admin', datetime('now', 'localtime', '-' || ? || ' days'))
+`);
+
+const insertLine = db.prepare(`
+  INSERT INTO document_lines (document_id, item_id, quantity, unit_price, note)
+  VALUES (?, ?, ?, ?, '')
 `);
 
 const leaves = [];
@@ -171,36 +181,84 @@ function insertNodes(nodes, parentId) {
   });
 }
 
-// Sinh giao dịch rải trong 7 ngày qua để biểu đồ và các thẻ có số liệu thật.
-// Tồn kho trong TREE là tồn HIỆN TẠI, nên các giao dịch này chỉ là lịch sử phát sinh
-// và không được cộng thêm vào items.quantity.
-function seedTransactions() {
+const SUPPLIERS = ['Nhà cung cấp A', 'Nhà cung cấp B', 'Chợ đầu mối', 'Công ty thực phẩm Sài Gòn'];
+const DESTINATIONS = ['Bếp chính', 'Quầy bar', 'Bếp phụ'];
+
+// Sinh phiếu nhập/xuất rải trong 7 ngày qua, mỗi phiếu vài dòng hàng.
+// Tồn kho trong TREE là tồn HIỆN TẠI nên các giao dịch này chỉ là lịch sử phát sinh,
+// không cộng thêm vào items.quantity.
+function seedDocuments() {
   let seed = 12345;
   const random = () => {
     seed = (seed * 1103515245 + 12345) % 2147483648;
     return seed / 2147483648;
   };
 
-  let count = 0;
-  for (let daysAgo = 6; daysAgo >= 1; daysAgo -= 1) {
-    const perDay = 3 + Math.floor(random() * 3);
+  const counters = new Map();
+  let documents = 0;
+  let lines = 0;
+
+  for (let daysAgo = 6; daysAgo >= 0; daysAgo -= 1) {
+    const perDay = 2 + Math.floor(random() * 3);
     for (let n = 0; n < perDay; n += 1) {
-      const leaf = leaves[Math.floor(random() * leaves.length)];
-      const isIn = random() < 0.45;
-      const quantity = Math.round(leaf.qty * (0.1 + random() * 0.25) * 10) / 10 || 1;
-      insertTx.run(
-        leaf.id,
-        isIn ? 'in' : 'out',
-        'manual',
-        quantity,
-        leaf.price ?? 0,
-        isIn ? 'Nhập hàng' : 'Xuất bếp',
+      const isIn = random() < 0.5;
+      const subtype = isIn ? 'purchase' : 'usage';
+      const type = isIn ? 'in' : 'out';
+      const prefix = isIn ? 'NK' : 'XK';
+
+      const stamp = new Date(Date.now() - daysAgo * 86400000);
+      const datePart =
+        String(stamp.getFullYear()).slice(2) +
+        String(stamp.getMonth() + 1).padStart(2, '0') +
+        String(stamp.getDate()).padStart(2, '0');
+      const key = `${prefix}${datePart}`;
+      const seq = (counters.get(key) ?? 0) + 1;
+      counters.set(key, seq);
+
+      const lineCount = 1 + Math.floor(random() * 3);
+      const picked = [];
+      for (let k = 0; k < lineCount; k += 1) {
+        const leaf = leaves[Math.floor(random() * leaves.length)];
+        if (picked.some((entry) => entry.id === leaf.id)) continue;
+        const quantity = Math.round(leaf.qty * (0.1 + random() * 0.2) * 10) / 10 || 1;
+        picked.push({ id: leaf.id, quantity, price: leaf.price ?? 0 });
+      }
+      if (picked.length === 0) continue;
+
+      const totalValue =
+        Math.round(picked.reduce((sum, p) => sum + p.quantity * p.price, 0) * 100) / 100;
+
+      const { lastInsertRowid } = insertDocument.run(
+        `${key}-${String(seq).padStart(3, '0')}`,
+        type,
+        subtype,
+        isIn
+          ? SUPPLIERS[Math.floor(random() * SUPPLIERS.length)]
+          : DESTINATIONS[Math.floor(random() * DESTINATIONS.length)],
+        totalValue,
+        '',
         daysAgo
       );
-      count += 1;
+      const documentId = Number(lastInsertRowid);
+
+      for (const entry of picked) {
+        insertLine.run(documentId, entry.id, entry.quantity, entry.price);
+        insertTx.run(
+          entry.id,
+          type,
+          'manual',
+          entry.quantity,
+          entry.price,
+          isIn ? 'Nhập hàng' : 'Xuất bếp',
+          daysAgo,
+          documentId
+        );
+        lines += 1;
+      }
+      documents += 1;
     }
   }
-  return count;
+  return { documents, lines };
 }
 
 const { count } = db.prepare('SELECT COUNT(*) AS count FROM items').get();
@@ -210,15 +268,21 @@ if (count > 0 && !process.argv.includes('--force')) {
 }
 
 db.exec('DELETE FROM transactions');
+db.exec('DELETE FROM document_lines');
+db.exec('DELETE FROM documents');
 db.exec('DELETE FROM daily_snapshots');
 db.exec('DELETE FROM items');
-db.exec("DELETE FROM sqlite_sequence WHERE name IN ('items', 'transactions')");
+db.exec(
+  "DELETE FROM sqlite_sequence WHERE name IN ('items', 'transactions', 'documents', 'document_lines')"
+);
 insertNodes(TREE, null);
-const txCount = seedTransactions();
+const { documents, lines } = seedDocuments();
 
 const { count: total } = db.prepare('SELECT COUNT(*) AS count FROM items').get();
 const { value } = db
   .prepare('SELECT COALESCE(SUM(quantity * unit_price), 0) AS value FROM items')
   .get();
-console.log(`Đã nạp ${total} mục vào kho, ${txCount} giao dịch trong 7 ngày qua.`);
+console.log(
+  `Đã nạp ${total} mục vào kho, ${documents} phiếu (${lines} dòng hàng) trong 7 ngày qua.`
+);
 console.log(`Giá trị tồn kho: ${value.toLocaleString('vi-VN')} đ`);

@@ -10,8 +10,8 @@ const selectOne = db.prepare(`
   WHERE t.id = ?
 `);
 const insertTx = db.prepare(`
-  INSERT INTO transactions (item_id, kind, source, quantity, unit_price, note, occurred_at)
-  VALUES (?, ?, ?, ?, ?, ?, COALESCE(?, ${NOW}))
+  INSERT INTO transactions (item_id, kind, source, quantity, unit_price, note, occurred_at, document_id)
+  VALUES (?, ?, ?, ?, ?, ?, COALESCE(?, ${NOW}), ?)
 `);
 const deleteTx = db.prepare('DELETE FROM transactions WHERE id = ?');
 const setQuantity = db.prepare(
@@ -38,11 +38,13 @@ export function recordTransaction({
   unitPrice = null,
   note = '',
   occurredAt = null,
+  documentId = null,
 }) {
   const item = selectItem.get(itemId);
   if (!item) throw fail('Mục không tồn tại', 404);
 
-  const quantity = item.quantity + delta;
+  // Làm tròn để phép cộng dồn số thực không tích luỹ rác kiểu 0.20000000000000284
+  const quantity = Math.round((item.quantity + delta) * 1e6) / 1e6;
   if (quantity < 0) {
     throw fail(
       `Không đủ số lượng: "${item.name}" chỉ còn ${item.quantity}${item.unit ? ` ${item.unit}` : ''}`
@@ -59,7 +61,8 @@ export function recordTransaction({
     Math.abs(delta),
     price,
     note,
-    occurredAt
+    occurredAt,
+    documentId
   );
 
   // Giá vốn chỉ đổi khi nhập hàng có khai giá
@@ -218,7 +221,8 @@ router.patch('/:id', (req, res, next) => {
 
     tx(() => {
       const item = selectItem.get(existing.item_id);
-      const nextQuantity = item.quantity - signedDelta(existing) + nextDelta;
+      const nextQuantity =
+        Math.round((item.quantity - signedDelta(existing) + nextDelta) * 1e6) / 1e6;
       if (nextQuantity < 0) {
         throw fail(
           `Sửa giao dịch này sẽ làm tồn kho "${item.name}" xuống âm (${nextQuantity}). Hãy kiểm tra lại các giao dịch sau nó.`
@@ -246,7 +250,7 @@ router.delete('/:id', (req, res, next) => {
 
     tx(() => {
       const item = selectItem.get(existing.item_id);
-      const nextQuantity = item.quantity - signedDelta(existing);
+      const nextQuantity = Math.round((item.quantity - signedDelta(existing)) * 1e6) / 1e6;
       // Không clamp như /adjust: clamp ở đây làm sổ ghi lệch khỏi tồn kho vĩnh viễn,
       // và biểu đồ suy ra từ sổ ghi nên sẽ sai mãi
       if (nextQuantity < 0) {

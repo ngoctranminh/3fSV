@@ -114,6 +114,58 @@ const PRESETS = [
   },
   {
     method: 'GET',
+    path: '/api/documents/types',
+    label: 'Loại phiếu nhập/xuất',
+    desc: 'Bốn nút hành động. Lưu ý "Trả hàng" nằm tab Nhập nhưng type là "out" vì trừ kho.',
+  },
+  {
+    method: 'GET',
+    path: '/api/documents/summary',
+    label: 'Thông tin hôm nay',
+    desc: 'Tổng nhập / tổng xuất kèm số phiếu. Đổi ?period=week|month|all.',
+  },
+  {
+    method: 'GET',
+    path: '/api/documents?limit=10',
+    label: 'Danh sách phiếu',
+    desc: 'Lọc bằng q, type, subtype, period, from, to, status.',
+  },
+  {
+    method: 'GET',
+    path: '/api/documents/1',
+    label: 'Chi tiết phiếu',
+    desc: 'Phiếu kèm toàn bộ dòng hàng bên trong.',
+  },
+  {
+    method: 'POST',
+    path: '/api/documents',
+    label: 'Tạo phiếu',
+    desc: 'Chỉ gửi subtype, server tự suy ra chiều nhập/xuất và sinh mã phiếu.',
+    body: {
+      subtype: 'purchase',
+      party: 'Nhà cung cấp A',
+      note: '',
+      lines: [
+        { item_id: 3, quantity: 5, unit_price: 180000 },
+        { item_id: 5, quantity: 10, unit_price: 25000 },
+      ],
+    },
+  },
+  {
+    method: 'POST',
+    path: '/api/documents/1/cancel',
+    label: 'Huỷ phiếu',
+    desc: 'Đảo ngược tồn kho, giữ lại phiếu để kiểm toán. Báo lỗi nếu làm tồn kho âm.',
+    danger: true,
+  },
+  {
+    method: 'GET',
+    path: '/api/documents/parties',
+    label: 'Danh sách NCC',
+    desc: 'Gợi ý nhà cung cấp và nơi nhận đã dùng, sắp theo lần dùng gần nhất.',
+  },
+  {
+    method: 'GET',
     path: '/health',
     label: 'Kiểm tra server',
     desc: 'Trạng thái và thời gian server đã chạy.',

@@ -121,6 +121,76 @@ db.exec(`
   )
 `);
 
+// Phiếu là lớp nằm trên sổ cái transactions: một phiếu gồm nhiều dòng, mỗi dòng vẫn sinh
+// một transaction nên biểu đồ và cảnh báo không cần biết gì về phiếu.
+// type là chiều tồn kho THẬT, không theo tab hiển thị: "Trả hàng" nằm ở tab Nhập kho
+// nhưng type='out' vì trả lại NCC là trừ kho.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS documents (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    code        TEXT    NOT NULL UNIQUE,
+    type        TEXT    NOT NULL CHECK (type IN ('in', 'out')),
+    subtype     TEXT    NOT NULL,
+    party       TEXT    NOT NULL DEFAULT '',
+    status      TEXT    NOT NULL DEFAULT 'completed'
+                        CHECK (status IN ('completed', 'cancelled')),
+    total_value REAL    NOT NULL DEFAULT 0,
+    note        TEXT    NOT NULL DEFAULT '',
+    created_by  TEXT    NOT NULL DEFAULT 'Admin',
+    occurred_at TEXT    NOT NULL DEFAULT (${NOW}),
+    created_at  TEXT    NOT NULL DEFAULT (${NOW})
+  )
+`);
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS document_lines (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    document_id INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+    item_id     INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+    quantity    REAL    NOT NULL CHECK (quantity > 0),
+    unit_price  REAL    NOT NULL DEFAULT 0,
+    note        TEXT    NOT NULL DEFAULT ''
+  )
+`);
+
+db.exec('CREATE INDEX IF NOT EXISTS idx_doc_occurred ON documents(occurred_at)');
+db.exec('CREATE INDEX IF NOT EXISTS idx_doc_type ON documents(type)');
+db.exec('CREATE INDEX IF NOT EXISTS idx_doc_lines_doc ON document_lines(document_id)');
+
+// Không thêm 'document' vào CHECK của transactions.source: document_id IS NOT NULL đã đủ,
+// và đổi CHECK bắt buộc dựng lại bảng vì ALTER TABLE ADD CONSTRAINT của SQLite im lặng
+// không có tác dụng
+const txColumns = new Set(
+  db.prepare('PRAGMA table_info(transactions)').all().map((column) => column.name)
+);
+if (!txColumns.has('document_id')) {
+  db.exec('ALTER TABLE transactions ADD COLUMN document_id INTEGER REFERENCES documents(id)');
+}
+db.exec('CREATE INDEX IF NOT EXISTS idx_tx_document ON transactions(document_id)');
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS users (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    username      TEXT    NOT NULL COLLATE NOCASE UNIQUE,
+    password_salt TEXT    NOT NULL,
+    password_hash TEXT    NOT NULL,
+    created_at    TEXT    NOT NULL DEFAULT (${NOW}),
+    updated_at    TEXT    NOT NULL DEFAULT (${NOW})
+  )
+`);
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS sessions (
+    token_hash TEXT    PRIMARY KEY,
+    user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    expires_at INTEGER NOT NULL,
+    created_at TEXT    NOT NULL DEFAULT (${NOW})
+  )
+`);
+
+db.exec('CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id)');
+db.exec('CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at)');
+
 // SQLite không có transaction lồng nhau nên tx() không được gọi bên trong tx()
 export function tx(fn) {
   db.exec('BEGIN');

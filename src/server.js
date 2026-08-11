@@ -1,8 +1,11 @@
 import express from 'express';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { requireAuth } from './auth.js';
+import authRouter from './routes/auth.js';
 import itemsRouter from './routes/items.js';
 import transactionsRouter from './routes/transactions.js';
+import documentsRouter from './routes/documents.js';
 import statsRouter from './routes/stats.js';
 
 const rootDir = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -28,8 +31,11 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok', uptime: process.uptime() });
 });
 
+app.use('/api/auth', authRouter);
+app.use('/api', requireAuth);
 app.use('/api/items', itemsRouter);
 app.use('/api/transactions', transactionsRouter);
+app.use('/api/documents', documentsRouter);
 app.use('/api', statsRouter);
 
 app.use((req, res) => {

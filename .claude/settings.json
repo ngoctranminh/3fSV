@@ -22,7 +22,13 @@
       "Bash(node -e \"import\\('./src/db.js'\\).then\\(\\(\\)=>console.log\\('  xong'\\)\\)\")",
       "Bash(node -e \"import\\('./src/db.js'\\).then\\(\\(\\)=>console.log\\('  lần 2: OK'\\)\\)\")",
       "Bash(node -e \"import\\('./src/db.js'\\).then\\(\\(\\)=>console.log\\('  lần 3: OK'\\)\\)\")",
-      "Bash(git add *)"
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)",
+      "Bash(gh repo *)",
+      "Bash(curl -s \"https://api.github.com/repos/ngoctran5596/3fSV\")",
+      "Bash(echo \"--- exit:$?\")",
+      "Bash(curl -s -m 3 -o /dev/null -w \"localhost:3000 -> %{http_code}\\\\n\" http://localhost:3000/health)",
+      "Bash(curl -s -m 3 -o /dev/null -w \"192.168.0.63:3000 -> %{http_code}\\\\n\" http://192.168.0.63:3000/health)"
     ]
   }
 }

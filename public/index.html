@@ -15,6 +15,8 @@
     <button id="expand-all">Mở hết</button>
     <button id="collapse-all">Thu hết</button>
     <a href="api.html" class="api-link">Bảng thử API</a>
+    <span id="current-user" class="current-user"></span>
+    <button id="logout" type="button">Đăng xuất</button>
   </div>
   <div id="alerts" class="alerts"></div>
 </header>
@@ -28,11 +30,11 @@
   <form method="dialog" id="editor-form">
     <h2 id="editor-title">Sửa mục</h2>
     <label>Tên<input name="name" required autocomplete="off"></label>
-    <div class="row">
+    <div class="row" id="stock-fields">
       <label>Số lượng<input name="quantity" type="number" step="any" min="0" value="0"></label>
       <label>Đơn vị<input name="unit" placeholder="gói, kg, hộp..." autocomplete="off"></label>
     </div>
-    <label>Hạn dùng<input name="expires_at" type="date"></label>
+    <label id="expiry-field">Hạn dùng<input name="expires_at" type="date"></label>
     <label>Ghi chú<textarea name="note" rows="2"></textarea></label>
     <div class="actions">
       <button value="cancel" formnovalidate>Huỷ</button>
