@@ -3,4 +3,4 @@ data/
 .env
 *.log
 MO-CLAUDE-VSCODE.command
-.claude
+.claude/
