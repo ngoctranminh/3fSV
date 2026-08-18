@@ -158,7 +158,7 @@ const PRESETS = [
     method: 'POST',
     path: '/api/documents',
     label: 'Tạo phiếu',
-    desc: 'Có thể gửi image dạng data:image/jpeg;base64,... (JPEG/PNG/WebP/GIF, tối đa 5 MB).',
+    desc: 'Có thể gửi image dạng data:image/jpeg;base64,... (tối đa 5 MB). Server resize tối đa 1024px và lưu WebP.',
     body: {
       subtype: 'purchase',
       party: 'Nhà cung cấp A',

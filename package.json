@@ -12,6 +12,7 @@
     "users:create": "node src/create-users.js"
   },
   "dependencies": {
-    "express": "^4.21.2"
+    "express": "^4.21.2",
+    "sharp": "^0.35.3"
   }
 }

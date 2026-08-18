@@ -156,6 +156,7 @@ button.primary {
 .badge.zero { color: var(--muted); background: none; border: 1px solid var(--line); }
 .badge.date { font-size: 12px; color: var(--muted); }
 .badge.date.soon { color: var(--danger); font-weight: 600; }
+.badge.price:not(.zero) { color: var(--text); }
 
 .note {
   color: var(--muted);

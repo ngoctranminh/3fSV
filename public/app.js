@@ -135,6 +135,12 @@ function daysUntil(dateStr) {
   return Math.round((new Date(`${dateStr}T00:00:00`) - today) / 86400000);
 }
 
+function formatPrice(value) {
+  return `${new Intl.NumberFormat(activeLocale, {
+    maximumFractionDigits: 2,
+  }).format(value)} Kč`;
+}
+
 function markContainers(nodes) {
   for (const node of nodes) {
     markContainers(node.children);
@@ -174,6 +180,14 @@ function renderNode(item, query) {
     parts.push(el('span', {
       className: item.quantity > 0 ? 'badge' : 'badge zero',
       textContent: `${item.quantity}${item.unit ? ` ${item.unit}` : ''}`,
+    }));
+  }
+
+  if (!isContainer) {
+    parts.push(el('span', {
+      className: item.unit_price > 0 ? 'badge price' : 'badge price zero',
+      textContent: `${formatPrice(item.unit_price)}${item.unit ? `/${item.unit}` : ''}`,
+      title: 'Đơn giá',
     }));
   }
 

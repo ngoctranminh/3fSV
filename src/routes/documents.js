@@ -1,4 +1,5 @@
 import { Router, raw } from 'express';
+import sharp from 'sharp';
 import { db, tx, NOW } from '../db.js';
 import { recordTransaction } from './transactions.js';
 
@@ -18,8 +19,12 @@ const SUBTYPES = {
 const TYPE_LABELS = { in: 'Nhập kho', out: 'Xuất kho' };
 const STATUS_LABELS = { completed: 'Hoàn thành', cancelled: 'Đã huỷ' };
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+const IMAGE_MAX_DIMENSION = 1024;
+const WEBP_QUALITY = 65;
 const IMAGE_TYPES = {
   'image/jpeg': 'jpg',
+  // react-native-image-picker trên iOS trả alias này cho ảnh chụp từ camera.
+  'image/jpg': 'jpg',
   'image/png': 'png',
   'image/webp': 'webp',
   'image/gif': 'gif',
@@ -111,7 +116,9 @@ function cleanFileName(value, mimeType) {
 }
 
 function hasValidSignature(data, mimeType) {
-  if (mimeType === 'image/jpeg') return data.length >= 3 && data.subarray(0, 3).equals(Buffer.from([0xff, 0xd8, 0xff]));
+  if (mimeType === 'image/jpeg' || mimeType === 'image/jpg') {
+    return data.length >= 3 && data.subarray(0, 3).equals(Buffer.from([0xff, 0xd8, 0xff]));
+  }
   if (mimeType === 'image/png') return data.length >= 8 && data.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
   if (mimeType === 'image/gif') return data.length >= 6 && ['GIF87a', 'GIF89a'].includes(data.subarray(0, 6).toString('ascii'));
   if (mimeType === 'image/webp') return data.length >= 12 && data.subarray(0, 4).toString('ascii') === 'RIFF' && data.subarray(8, 12).toString('ascii') === 'WEBP';
@@ -126,6 +133,39 @@ function validateImage(data, mimeType, fileName) {
   if (data.length > MAX_IMAGE_BYTES) throw fail('Ảnh không được lớn hơn 5 MB', 413);
   if (!hasValidSignature(data, mimeType)) throw fail('Nội dung ảnh không đúng với định dạng khai báo');
   return { data, mimeType, fileName: cleanFileName(fileName, mimeType) };
+}
+
+async function optimizeImage(image) {
+  try {
+    const data = await sharp(image.data, { failOn: 'error' })
+      .rotate()
+      .resize({
+        width: IMAGE_MAX_DIMENSION,
+        height: IMAGE_MAX_DIMENSION,
+        fit: 'inside',
+        withoutEnlargement: true,
+      })
+      .webp({
+        quality: WEBP_QUALITY,
+        effort: 4,
+        preset: 'text',
+        smartSubsample: true,
+      })
+      .toBuffer();
+
+    if (data.length > MAX_IMAGE_BYTES) {
+      throw fail('Ảnh WebP sau khi nén vẫn lớn hơn 5 MB', 413);
+    }
+    const baseName = image.fileName.replace(/\.[^.]+$/, '') || 'anh-phieu';
+    return {
+      data,
+      fileName: `${baseName}.webp`,
+      mimeType: 'image/webp',
+    };
+  } catch (error) {
+    if (error?.status) throw error;
+    throw fail('Không thể nén ảnh sang WebP');
+  }
 }
 
 function parseDataUrl(value, fileName) {
@@ -327,18 +367,19 @@ router.get('/:id/image', (req, res, next) => {
   }
 });
 
-router.put('/:id/image', raw({ type: 'image/*', limit: MAX_IMAGE_BYTES }), (req, res, next) => {
+router.put('/:id/image', raw({ type: 'image/*', limit: MAX_IMAGE_BYTES }), async (req, res, next) => {
   try {
     const id = Number(req.params.id);
     if (!Number.isInteger(id)) throw fail('Mã phiếu không hợp lệ');
     if (!selectDocument.get(id)) throw fail('Phiếu không tồn tại', 404);
 
     const mimeType = req.get('Content-Type')?.split(';', 1)[0].toLowerCase();
-    const image = validateImage(
+    const inputImage = validateImage(
       Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0),
       mimeType,
       req.get('X-File-Name')
     );
+    const image = await optimizeImage(inputImage);
     saveImage.run(id, image.fileName, image.mimeType, image.data);
     res.json(decorate(selectDocument.get(id)));
   } catch (err) {
@@ -368,7 +409,7 @@ router.get('/:id', (req, res, next) => {
   }
 });
 
-router.post('/', (req, res, next) => {
+router.post('/', async (req, res, next) => {
   try {
     const body = req.body ?? {};
     const meta = SUBTYPES[body.subtype];
@@ -409,7 +450,8 @@ router.post('/', (req, res, next) => {
     const note = body.note === undefined ? '' : String(body.note).trim();
     // Luôn lấy từ phiên đăng nhập, không nhận tên do client tự khai.
     const createdBy = req.user.username;
-    const image = parseDataUrl(body.image, body.image_name);
+    const inputImage = parseDataUrl(body.image, body.image_name);
+    const image = inputImage ? await optimizeImage(inputImage) : null;
 
     const totalValue =
       Math.round(
