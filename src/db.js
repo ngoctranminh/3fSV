@@ -97,6 +97,8 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS transactions (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     item_id     INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+    user_id     INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    username    TEXT,
     kind        TEXT    NOT NULL CHECK (kind IN ('in', 'out')),
     source      TEXT    NOT NULL DEFAULT 'manual'
                         CHECK (source IN ('manual', 'adjust', 'edit', 'initial')),
@@ -153,6 +155,18 @@ db.exec(`
   )
 `);
 
+// Ảnh chứng từ được tách khỏi documents để các truy vấn danh sách phiếu không phải
+// đọc BLOB lớn. Mỗi phiếu hiện có tối đa một ảnh và ảnh bị xoá theo phiếu.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS document_images (
+    document_id INTEGER PRIMARY KEY REFERENCES documents(id) ON DELETE CASCADE,
+    file_name   TEXT    NOT NULL,
+    mime_type   TEXT    NOT NULL,
+    data        BLOB    NOT NULL,
+    created_at  TEXT    NOT NULL DEFAULT (${NOW})
+  )
+`);
+
 db.exec('CREATE INDEX IF NOT EXISTS idx_doc_occurred ON documents(occurred_at)');
 db.exec('CREATE INDEX IF NOT EXISTS idx_doc_type ON documents(type)');
 db.exec('CREATE INDEX IF NOT EXISTS idx_doc_lines_doc ON document_lines(document_id)');
@@ -186,6 +200,21 @@ const userColumns = new Set(
 if (!userColumns.has('role')) {
   db.exec("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user' CHECK (role IN ('admin', 'user'))");
 }
+
+// Gắn người thao tác vào từng lần nhập/xuất. username là bản chụp để lịch sử vẫn
+// đọc được sau khi tài khoản bị đổi tên hoặc xoá; các giao dịch cũ để NULL vì không
+// thể suy ra chính xác người đã thực hiện.
+const transactionActorColumns = new Set(
+  db.prepare('PRAGMA table_info(transactions)').all().map((column) => column.name)
+);
+if (!transactionActorColumns.has('user_id')) {
+  db.exec('ALTER TABLE transactions ADD COLUMN user_id INTEGER REFERENCES users(id) ON DELETE SET NULL');
+}
+if (!transactionActorColumns.has('username')) {
+  db.exec('ALTER TABLE transactions ADD COLUMN username TEXT');
+}
+db.exec('CREATE INDEX IF NOT EXISTS idx_tx_user ON transactions(user_id)');
+db.exec('CREATE INDEX IF NOT EXISTS idx_tx_username ON transactions(username COLLATE NOCASE)');
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS sessions (

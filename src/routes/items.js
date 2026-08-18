@@ -149,6 +149,7 @@ router.post('/', (req, res, next) => {
           source: 'initial',
           unitPrice: unitPrice > 0 ? unitPrice : null,
           note: 'Tồn đầu',
+          user: req.user,
         });
       }
       return newId;
@@ -198,6 +199,7 @@ router.patch('/:id', (req, res, next) => {
           delta,
           source: 'edit',
           note: 'Sửa số lượng trực tiếp',
+          user: req.user,
         });
       }
     });
@@ -228,6 +230,7 @@ router.post('/:id/adjust', (req, res, next) => {
           delta: applied,
           source: 'adjust',
           note: applied > 0 ? 'Thêm nhanh' : 'Bớt nhanh',
+          user: req.user,
         })
       );
     }

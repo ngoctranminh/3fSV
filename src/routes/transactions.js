@@ -10,8 +10,9 @@ const selectOne = db.prepare(`
   WHERE t.id = ?
 `);
 const insertTx = db.prepare(`
-  INSERT INTO transactions (item_id, kind, source, quantity, unit_price, note, occurred_at, document_id)
-  VALUES (?, ?, ?, ?, ?, ?, COALESCE(?, ${NOW}), ?)
+  INSERT INTO transactions
+    (item_id, user_id, username, kind, source, quantity, unit_price, note, occurred_at, document_id)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, ${NOW}), ?)
 `);
 const deleteTx = db.prepare('DELETE FROM transactions WHERE id = ?');
 const setQuantity = db.prepare(
@@ -39,6 +40,7 @@ export function recordTransaction({
   note = '',
   occurredAt = null,
   documentId = null,
+  user = null,
 }) {
   const item = selectItem.get(itemId);
   if (!item) throw fail('Mục không tồn tại', 404);
@@ -56,6 +58,8 @@ export function recordTransaction({
 
   const { lastInsertRowid } = insertTx.run(
     itemId,
+    user?.id ?? null,
+    user?.username ?? null,
     kind,
     source,
     Math.abs(delta),
@@ -130,6 +134,18 @@ router.get('/', (req, res, next) => {
       conditions.push('t.source = ?');
       params.push(String(req.query.source));
     }
+    if (req.query.user_id !== undefined) {
+      const userId = Number(req.query.user_id);
+      if (!Number.isInteger(userId)) throw fail('"user_id" phải là số nguyên');
+      conditions.push('t.user_id = ?');
+      params.push(userId);
+    }
+    if (req.query.username !== undefined) {
+      const username = String(req.query.username).trim();
+      if (!username) throw fail('"username" không được để trống');
+      conditions.push('t.username = ? COLLATE NOCASE');
+      params.push(username);
+    }
     if (req.query.from !== undefined) {
       conditions.push('date(t.occurred_at) >= date(?)');
       params.push(parseOccurredAt(req.query.from));
@@ -193,6 +209,7 @@ router.post('/', (req, res, next) => {
         unitPrice,
         note,
         occurredAt,
+        user: req.user,
       })
     );
 
@@ -281,6 +298,7 @@ router.post('/:id/undo', (req, res, next) => {
         source: 'manual',
         unitPrice: existing.unit_price,
         note: `Hoàn tác giao dịch #${id}`,
+        user: req.user,
       })
     );
 

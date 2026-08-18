@@ -1,4 +1,4 @@
-import { Router } from 'express';
+import { Router, raw } from 'express';
 import { db, tx, NOW } from '../db.js';
 import { recordTransaction } from './transactions.js';
 
@@ -17,8 +17,21 @@ const SUBTYPES = {
 
 const TYPE_LABELS = { in: 'Nhập kho', out: 'Xuất kho' };
 const STATUS_LABELS = { completed: 'Hoàn thành', cancelled: 'Đã huỷ' };
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+const IMAGE_TYPES = {
+  'image/jpeg': 'jpg',
+  'image/png': 'png',
+  'image/webp': 'webp',
+  'image/gif': 'gif',
+};
 
-const selectDocument = db.prepare('SELECT * FROM documents WHERE id = ?');
+const selectDocument = db.prepare(`
+  SELECT d.*, EXISTS(
+    SELECT 1 FROM document_images image WHERE image.document_id = d.id
+  ) AS has_image
+  FROM documents d
+  WHERE d.id = ?
+`);
 const selectLines = db.prepare(`
   WITH RECURSIVE path(id, trail) AS (
     SELECT id, name FROM items WHERE parent_id IS NULL
@@ -51,6 +64,17 @@ const setItemQuantity = db.prepare(
   `UPDATE items SET quantity = ?, updated_at = ${NOW} WHERE id = ?`
 );
 const selectItem = db.prepare('SELECT * FROM items WHERE id = ?');
+const selectImage = db.prepare('SELECT * FROM document_images WHERE document_id = ?');
+const saveImage = db.prepare(`
+  INSERT INTO document_images (document_id, file_name, mime_type, data)
+  VALUES (?, ?, ?, ?)
+  ON CONFLICT(document_id) DO UPDATE SET
+    file_name = excluded.file_name,
+    mime_type = excluded.mime_type,
+    data = excluded.data,
+    created_at = ${NOW}
+`);
+const deleteImage = db.prepare('DELETE FROM document_images WHERE document_id = ?');
 
 function fail(message, status = 400) {
   return Object.assign(new Error(message), { status });
@@ -70,7 +94,50 @@ function decorate(row) {
     subtype_label: meta ? meta.label : row.subtype,
     status_label: STATUS_LABELS[row.status],
     occurred_at_label: toVnDateTime(row.occurred_at),
+    has_image: Boolean(row.has_image),
+    image_url: row.has_image ? `/api/documents/${row.id}/image` : null,
   };
+}
+
+function cleanFileName(value, mimeType) {
+  const fallback = `anh-phieu.${IMAGE_TYPES[mimeType]}`;
+  if (value === undefined || value === null || value === '') return fallback;
+  if (typeof value !== 'string') throw fail('"image_name" phải là chuỗi');
+  const name = value.trim();
+  if (!name || name.length > 255 || /[\r\n/\\]/.test(name)) {
+    throw fail('"image_name" không hợp lệ');
+  }
+  return name;
+}
+
+function hasValidSignature(data, mimeType) {
+  if (mimeType === 'image/jpeg') return data.length >= 3 && data.subarray(0, 3).equals(Buffer.from([0xff, 0xd8, 0xff]));
+  if (mimeType === 'image/png') return data.length >= 8 && data.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+  if (mimeType === 'image/gif') return data.length >= 6 && ['GIF87a', 'GIF89a'].includes(data.subarray(0, 6).toString('ascii'));
+  if (mimeType === 'image/webp') return data.length >= 12 && data.subarray(0, 4).toString('ascii') === 'RIFF' && data.subarray(8, 12).toString('ascii') === 'WEBP';
+  return false;
+}
+
+function validateImage(data, mimeType, fileName) {
+  if (!IMAGE_TYPES[mimeType]) {
+    throw fail('Ảnh phải có định dạng JPEG, PNG, WebP hoặc GIF');
+  }
+  if (!Buffer.isBuffer(data) || data.length === 0) throw fail('Dữ liệu ảnh không được để trống');
+  if (data.length > MAX_IMAGE_BYTES) throw fail('Ảnh không được lớn hơn 5 MB', 413);
+  if (!hasValidSignature(data, mimeType)) throw fail('Nội dung ảnh không đúng với định dạng khai báo');
+  return { data, mimeType, fileName: cleanFileName(fileName, mimeType) };
+}
+
+function parseDataUrl(value, fileName) {
+  if (value === undefined || value === null || value === '') return null;
+  if (typeof value !== 'string') throw fail('"image" phải là data URL dạng base64');
+  const match = /^data:([^;,]+);base64,([A-Za-z0-9+/=\s]+)$/.exec(value);
+  if (!match) throw fail('"image" phải có dạng data:image/jpeg;base64,...');
+  const encoded = match[2].replace(/\s/g, '');
+  if (encoded.length % 4 !== 0 || !/^[A-Za-z0-9+/]+={0,2}$/.test(encoded)) {
+    throw fail('Dữ liệu base64 của ảnh không hợp lệ');
+  }
+  return validateImage(Buffer.from(encoded, 'base64'), match[1].toLowerCase(), fileName);
 }
 
 function parseOccurredAt(value) {
@@ -221,6 +288,9 @@ router.get('/', (req, res, next) => {
     const items = db
       .prepare(
         `SELECT d.*,
+                EXISTS(
+                  SELECT 1 FROM document_images image WHERE image.document_id = d.id
+                ) AS has_image,
                 (SELECT COUNT(*) FROM document_lines l WHERE l.document_id = d.id) AS line_count
          FROM documents d ${where}
          ORDER BY d.occurred_at DESC, d.id DESC
@@ -230,6 +300,59 @@ router.get('/', (req, res, next) => {
       .map(decorate);
 
     res.json({ items, total, limit, offset });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.get('/:id/image', (req, res, next) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) throw fail('Mã phiếu không hợp lệ');
+    if (!selectDocument.get(id)) throw fail('Phiếu không tồn tại', 404);
+    const image = selectImage.get(id);
+    if (!image) throw fail('Phiếu chưa có ảnh', 404);
+
+    const fileName = encodeURIComponent(image.file_name).replace(/'/g, '%27');
+    const data = Buffer.from(image.data);
+    res.set({
+      'Content-Type': image.mime_type,
+      'Content-Length': String(data.length),
+      'Content-Disposition': `inline; filename*=UTF-8''${fileName}`,
+      'Cache-Control': 'private, no-store',
+    });
+    res.send(data);
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.put('/:id/image', raw({ type: 'image/*', limit: MAX_IMAGE_BYTES }), (req, res, next) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) throw fail('Mã phiếu không hợp lệ');
+    if (!selectDocument.get(id)) throw fail('Phiếu không tồn tại', 404);
+
+    const mimeType = req.get('Content-Type')?.split(';', 1)[0].toLowerCase();
+    const image = validateImage(
+      Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0),
+      mimeType,
+      req.get('X-File-Name')
+    );
+    saveImage.run(id, image.fileName, image.mimeType, image.data);
+    res.json(decorate(selectDocument.get(id)));
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.delete('/:id/image', (req, res, next) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) throw fail('Mã phiếu không hợp lệ');
+    if (!selectDocument.get(id)) throw fail('Phiếu không tồn tại', 404);
+    if (deleteImage.run(id).changes === 0) throw fail('Phiếu chưa có ảnh', 404);
+    res.status(204).end();
   } catch (err) {
     next(err);
   }
@@ -284,7 +407,9 @@ router.post('/', (req, res, next) => {
     const occurredAt = parseOccurredAt(body.occurred_at);
     const party = body.party === undefined ? '' : String(body.party).trim();
     const note = body.note === undefined ? '' : String(body.note).trim();
-    const createdBy = body.created_by === undefined ? 'Admin' : String(body.created_by).trim();
+    // Luôn lấy từ phiên đăng nhập, không nhận tên do client tự khai.
+    const createdBy = req.user.username;
+    const image = parseDataUrl(body.image, body.image_name);
 
     const totalValue =
       Math.round(
@@ -320,8 +445,10 @@ router.post('/', (req, res, next) => {
           note: line.note || `${meta.label}${party ? ` — ${party}` : ''}`,
           occurredAt,
           documentId,
+          user: req.user,
         });
       }
+      if (image) saveImage.run(documentId, image.fileName, image.mimeType, image.data);
       return documentId;
     });
 

@@ -18,7 +18,9 @@ if (bootstrappedUsers.length > 0) {
   console.log(`Đã khởi tạo ${bootstrappedUsers.length} tài khoản ban đầu.`);
 }
 
-app.use(express.json());
+// Ảnh phiếu có thể được gửi dưới dạng data URL trong JSON. 7 MB đủ cho ảnh 5 MB
+// sau khi base64 tăng kích thước khoảng một phần ba.
+app.use(express.json({ limit: '7mb' }));
 app.use(express.static(join(rootDir, 'public')));
 
 // Đặt sau express.static nên chỉ ghi log request API, không ghi file tĩnh
