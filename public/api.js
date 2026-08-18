@@ -9,9 +9,9 @@ const responseEl = document.getElementById('response');
 const PRESETS = [
   {
     method: 'GET',
-    path: '/api/items',
+    path: '/api/items?locale=en-US',
     label: 'Lấy cây mục',
-    desc: 'Toàn bộ kho dạng cây. Thêm ?flat=1 để lấy danh sách phẳng.',
+    desc: 'Toàn bộ kho dạng cây. locale chọn bản dịch và tự fallback về vi-VN; dùng flat=1 để lấy danh sách phẳng.',
   },
   {
     method: 'GET',
@@ -39,6 +39,10 @@ const PRESETS = [
       min_quantity: 1,
       expires_at: null,
       note: '',
+      translations: {
+        'en-US': { name: 'Fragrant rice', note: '' },
+        'cs-CZ': { name: 'Voňavá rýže', note: '' },
+      },
     },
   },
   {
@@ -46,7 +50,15 @@ const PRESETS = [
     path: '/api/items/1',
     label: 'Sửa mục',
     desc: 'Chỉ gửi những trường muốn đổi. Sửa quantity sẽ tự ghi một giao dịch vào sổ.',
-    body: { name: 'Tên mới', quantity: 5, unit_price: 35000 },
+    body: {
+      name: 'Tên mới',
+      quantity: 5,
+      unit_price: 35000,
+      translations: {
+        'en-US': { name: 'New name' },
+        'cs-CZ': null,
+      },
+    },
   },
   {
     method: 'POST',
@@ -76,9 +88,9 @@ const PRESETS = [
   },
   {
     method: 'GET',
-    path: '/api/alerts',
+    path: '/api/alerts?locale=en-US',
     label: 'Danh sách cảnh báo',
-    desc: 'Gộp sắp hết, sắp hết hạn và quá hạn. Sắp theo mức nghiêm trọng.',
+    desc: 'Gộp sắp hết, sắp hết hạn và quá hạn. locale dịch tên và toàn bộ đường dẫn cha/con.',
   },
   {
     method: 'GET',
@@ -191,6 +203,16 @@ const PRESETS = [
     label: 'Tạo tài khoản',
     desc: 'Chỉ quản trị viên đang đăng nhập được tạo tài khoản mới.',
     body: { username: 'nhanvien', password: 'mat-khau-moi' },
+  },
+  {
+    method: 'POST',
+    path: '/api/auth/change-password',
+    label: 'Tự đổi mật khẩu',
+    desc: 'Yêu cầu đăng nhập. Thu hồi các phiên khác và giữ đăng nhập trên thiết bị hiện tại.',
+    body: {
+      current_password: 'mat-khau-hien-tai',
+      new_password: 'mat-khau-moi',
+    },
   },
   {
     method: 'GET',

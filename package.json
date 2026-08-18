@@ -8,6 +8,7 @@
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
     "seed": "node src/seed.js",
+    "translations:seed": "node src/seed-translations.js",
     "users:create": "node src/create-users.js"
   },
   "dependencies": {

@@ -93,6 +93,22 @@ if (storedItemsSql.includes("datetime('now')")) {
   }
 }
 
+// Tên và ghi chú mặc định vẫn nằm trên items (vi-VN) để giữ tương thích với dữ liệu
+// hiện có. Mỗi bản dịch bổ sung là một hàng, nhờ vậy thêm locale mới không phải đổi schema.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS item_translations (
+    item_id    INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+    locale     TEXT    NOT NULL,
+    name       TEXT    NOT NULL,
+    note       TEXT    NOT NULL DEFAULT '',
+    created_at TEXT    NOT NULL DEFAULT (${NOW}),
+    updated_at TEXT    NOT NULL DEFAULT (${NOW}),
+    PRIMARY KEY (item_id, locale)
+  )
+`);
+
+db.exec('CREATE INDEX IF NOT EXISTS idx_item_translations_locale ON item_translations(locale)');
+
 db.exec(`
   CREATE TABLE IF NOT EXISTS transactions (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,

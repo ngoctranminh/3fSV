@@ -1,4 +1,5 @@
 import { db } from './db.js';
+import { seedDefaultItemTranslations } from './item-translations.js';
 
 const TREE = [
   {
@@ -276,6 +277,7 @@ db.exec(
   "DELETE FROM sqlite_sequence WHERE name IN ('items', 'transactions', 'documents', 'document_lines')"
 );
 insertNodes(TREE, null);
+const translationResult = seedDefaultItemTranslations();
 const { documents, lines } = seedDocuments();
 
 const { count: total } = db.prepare('SELECT COUNT(*) AS count FROM items').get();
@@ -285,4 +287,5 @@ const { value } = db
 console.log(
   `Đã nạp ${total} mục vào kho, ${documents} phiếu (${lines} dòng hàng) trong 7 ngày qua.`
 );
+console.log(`Đã thêm ${translationResult.added} bản dịch mặc định.`);
 console.log(`Giá trị tồn kho: ${value.toLocaleString('vi-VN')} đ`);

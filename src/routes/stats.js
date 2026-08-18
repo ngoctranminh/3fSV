@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { db, signedDeltaSql } from '../db.js';
+import { requestedLocale } from '../locale.js';
 
 const router = Router();
 
@@ -32,13 +33,18 @@ const upsertSnapshot = db.prepare(`
 
 // Tên mục lá thường trùng nhau ("Đã làm" có ở cả Mực và Bò) nên trả kèm đường dẫn cha
 const selectAlerts = db.prepare(`
-  WITH RECURSIVE path(id, trail) AS (
-    SELECT id, name FROM items WHERE parent_id IS NULL
+  WITH RECURSIVE path(id, name, trail) AS (
+    SELECT i.id, COALESCE(t.name, i.name), COALESCE(t.name, i.name)
+    FROM items i
+    LEFT JOIN item_translations t ON t.item_id = i.id AND t.locale = ?
+    WHERE i.parent_id IS NULL
     UNION ALL
-    SELECT i.id, p.trail || ' / ' || i.name
-    FROM items i JOIN path p ON i.parent_id = p.id
+    SELECT i.id, COALESCE(t.name, i.name), p.trail || ' / ' || COALESCE(t.name, i.name)
+    FROM items i
+    JOIN path p ON i.parent_id = p.id
+    LEFT JOIN item_translations t ON t.item_id = i.id AND t.locale = ?
   )
-  SELECT i.id, i.name, i.quantity, i.unit, i.min_quantity, i.expires_at, i.updated_at,
+  SELECT i.id, path.name, i.quantity, i.unit, i.min_quantity, i.expires_at, i.updated_at,
          path.trail AS full_name,
          CASE
            WHEN i.expires_at IS NOT NULL AND date(i.expires_at) < date('now', 'localtime') THEN 'expired'
@@ -170,13 +176,14 @@ router.get('/stats/value-history', (req, res, next) => {
 
 router.get('/alerts', (req, res, next) => {
   try {
+    const locale = requestedLocale(req);
     const limit = req.query.limit === undefined ? null : Number(req.query.limit);
     if (limit !== null && (!Number.isInteger(limit) || limit <= 0)) {
       return res.status(400).json({ error: '"limit" phải là số nguyên dương' });
     }
 
     const alerts = selectAlerts
-      .all(EXPIRING_DAYS)
+      .all(locale, locale, EXPIRING_DAYS)
       .map(buildAlert)
       .sort((a, b) => b.severity - a.severity || a.sort_key.localeCompare(b.sort_key))
       .map(({ sort_key, ...alert }) => alert);

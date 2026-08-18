@@ -11,6 +11,9 @@
   <h1>Quản lý kho</h1>
   <div class="toolbar">
     <input id="search" type="search" placeholder="Tìm mục...">
+    <select id="item-locale" aria-label="Ngôn ngữ tên mục" title="Ngôn ngữ tên mục">
+      <option value="vi-VN">Tên mặc định (vi-VN)</option>
+    </select>
     <button id="add-root" class="primary">+ Nhóm gốc</button>
     <button id="expand-all">Mở hết</button>
     <button id="collapse-all">Thu hết</button>
@@ -30,13 +33,22 @@
 <dialog id="editor">
   <form method="dialog" id="editor-form">
     <h2 id="editor-title">Sửa mục</h2>
-    <label>Tên<input name="name" required autocomplete="off"></label>
+    <label>Tên mặc định (vi-VN)<input name="name" required autocomplete="off"></label>
     <div class="row" id="stock-fields">
       <label>Số lượng<input name="quantity" type="number" step="any" min="0" value="0"></label>
       <label>Đơn vị<input name="unit" placeholder="gói, kg, hộp..." autocomplete="off"></label>
     </div>
+    <div class="row" id="value-fields">
+      <label>Đơn giá<input name="unit_price" type="number" step="any" min="0" value="0" inputmode="decimal"></label>
+      <label>Ngưỡng sắp hết<input name="min_quantity" type="number" step="any" min="0" value="0" inputmode="decimal"></label>
+    </div>
     <label id="expiry-field">Hạn dùng<input name="expires_at" type="date"></label>
-    <label>Ghi chú<textarea name="note" rows="2"></textarea></label>
+    <label>Ghi chú mặc định (vi-VN)<textarea name="note" rows="2"></textarea></label>
+    <fieldset class="translation-fields">
+      <legend>Bản dịch</legend>
+      <div id="translations"></div>
+      <button id="add-translation" type="button">+ Thêm bản dịch</button>
+    </fieldset>
     <div class="actions">
       <button value="cancel" formnovalidate>Huỷ</button>
       <button value="save" class="primary">Lưu</button>

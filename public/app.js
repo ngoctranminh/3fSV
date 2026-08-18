@@ -2,8 +2,13 @@ const treeEl = document.getElementById('tree');
 const emptyEl = document.getElementById('empty');
 const alertsEl = document.getElementById('alerts');
 const searchEl = document.getElementById('search');
+const localeEl = document.getElementById('item-locale');
 const dialog = document.getElementById('editor');
 const form = document.getElementById('editor-form');
+const translationsEl = document.getElementById('translations');
+const DEFAULT_LOCALE = 'vi-VN';
+
+let activeLocale = localStorage.getItem('item-locale') || DEFAULT_LOCALE;
 
 function formField(name) {
   return form.elements.namedItem(name);
@@ -14,6 +19,87 @@ let tree = [];
 
 function saveCollapsed() {
   localStorage.setItem('collapsed', JSON.stringify([...collapsed]));
+}
+
+function addTranslationRow(locale = '', translation = {}) {
+  const row = el('div', { className: 'translation-row' }, [
+    el('input', {
+      className: 'translation-locale',
+      value: locale,
+      placeholder: 'en-US',
+      title: 'Mã locale BCP 47, ví dụ en-US',
+      required: true,
+      autocomplete: 'off',
+    }),
+    el('input', {
+      className: 'translation-name',
+      value: translation.name || '',
+      placeholder: 'Tên đã dịch',
+      required: true,
+      autocomplete: 'off',
+    }),
+    el('textarea', {
+      className: 'translation-note',
+      value: translation.note || '',
+      placeholder: 'Ghi chú đã dịch',
+      rows: 2,
+    }),
+  ]);
+  const remove = el('button', {
+    type: 'button',
+    className: 'remove-translation',
+    textContent: '✕',
+    title: 'Xoá bản dịch',
+  });
+  remove.addEventListener('click', () => row.remove());
+  row.append(remove);
+  translationsEl.append(row);
+}
+
+function collectTranslations(item) {
+  const translations = Object.fromEntries(
+    Object.keys(item?.translations ?? {}).map((locale) => [locale, null])
+  );
+  const seen = new Set();
+
+  for (const row of translationsEl.querySelectorAll('.translation-row')) {
+    const rawLocale = row.querySelector('.translation-locale').value.trim();
+    let locale;
+    try {
+      locale = Intl.getCanonicalLocales(rawLocale)[0];
+    } catch {
+      throw new Error(`Locale "${rawLocale}" không hợp lệ`);
+    }
+    if (!locale) throw new Error('Locale của bản dịch là bắt buộc');
+    if (locale === DEFAULT_LOCALE) {
+      throw new Error(`Hãy dùng trường mặc định cho ${DEFAULT_LOCALE}`);
+    }
+    if (seen.has(locale)) throw new Error(`Locale "${locale}" đang bị lặp`);
+    seen.add(locale);
+    translations[locale] = {
+      name: row.querySelector('.translation-name').value,
+      note: row.querySelector('.translation-note').value,
+    };
+  }
+  return translations;
+}
+
+function syncLocaleOptions() {
+  const locales = new Set([DEFAULT_LOCALE, activeLocale]);
+  (function walk(nodes) {
+    for (const node of nodes) {
+      for (const locale of Object.keys(node.translations ?? {})) locales.add(locale);
+      walk(node.children);
+    }
+  })(tree);
+
+  localeEl.replaceChildren(
+    ...[...locales].sort().map((locale) => el('option', {
+      value: locale,
+      textContent: locale === DEFAULT_LOCALE ? `Tên mặc định (${locale})` : locale,
+    }))
+  );
+  localeEl.value = activeLocale;
 }
 
 async function api(path, options) {
@@ -52,8 +138,9 @@ function daysUntil(dateStr) {
 function markContainers(nodes) {
   for (const node of nodes) {
     markContainers(node.children);
-    // Nhóm gốc và mọi nút có con chỉ là thư mục, không phải mặt hàng tồn kho.
-    node.is_container = node.parent_id === null || node.children.length > 0;
+    // Chỉ nút có con mới là thư mục. Một sản phẩm vẫn có thể nằm ở cấp gốc
+    // (ví dụ "Rau củ quả") và phải sửa được số lượng, đơn giá, ngưỡng cảnh báo.
+    node.is_container = node.children.length > 0;
   }
 }
 
@@ -189,8 +276,10 @@ function render() {
 }
 
 async function load() {
-  tree = await api('');
+  const query = activeLocale === DEFAULT_LOCALE ? '' : `?locale=${encodeURIComponent(activeLocale)}`;
+  tree = await api(query);
   markContainers(tree);
+  syncLocaleOptions();
   render();
 }
 
@@ -212,16 +301,23 @@ function openEditor({ item = null, parentId = null } = {}) {
     ? `Sửa ${isContainer ? 'thư mục' : 'mục'}`
     : `Thêm ${isContainer ? 'thư mục' : 'mục'}`;
   form.reset();
+  translationsEl.replaceChildren();
   document.getElementById('stock-fields').hidden = isContainer;
+  document.getElementById('value-fields').hidden = isContainer;
   document.getElementById('expiry-field').hidden = isContainer;
   if (item) {
-    formField('name').value = item.name;
+    formField('name').value = item.default_name ?? item.name;
     if (!isContainer) {
       formField('quantity').value = item.quantity;
       formField('unit').value = item.unit;
+      formField('unit_price').value = item.unit_price;
+      formField('min_quantity').value = item.min_quantity;
       formField('expires_at').value = item.expires_at || '';
     }
-    formField('note').value = item.note;
+    formField('note').value = item.default_note ?? item.note;
+    for (const [locale, translation] of Object.entries(item.translations ?? {})) {
+      addTranslationRow(locale, translation);
+    }
   }
   dialog.showModal();
   formField('name').focus();
@@ -229,21 +325,38 @@ function openEditor({ item = null, parentId = null } = {}) {
 
 form.addEventListener('submit', (event) => {
   if (event.submitter?.value !== 'save') return;
+  event.preventDefault();
+  const { item, parentId, isContainer } = editing;
+  let translations;
+  try {
+    translations = collectTranslations(item);
+  } catch (err) {
+    alert(err.message);
+    return;
+  }
   const body = {
     name: formField('name').value,
     note: formField('note').value,
+    translations,
   };
-  const { item, parentId, isContainer } = editing;
   if (!isContainer) {
     body.quantity = Number(formField('quantity').value || 0);
     body.unit = formField('unit').value;
+    body.unit_price = Number(formField('unit_price').value || 0);
+    body.min_quantity = Number(formField('min_quantity').value || 0);
     body.expires_at = formField('expires_at').value || null;
   }
+  dialog.close();
   run(() =>
     item
       ? api(`/${item.id}`, { method: 'PATCH', body: JSON.stringify(body) })
       : api('', { method: 'POST', body: JSON.stringify({ ...body, parent_id: parentId }) })
   );
+});
+
+document.getElementById('add-translation').addEventListener('click', () => {
+  addTranslationRow();
+  translationsEl.lastElementChild.querySelector('.translation-locale').focus();
 });
 
 document.getElementById('add-root').addEventListener('click', () => openEditor());
@@ -266,6 +379,12 @@ document.getElementById('collapse-all').addEventListener('click', () => {
 });
 
 searchEl.addEventListener('input', render);
+
+localeEl.addEventListener('change', () => {
+  activeLocale = localeEl.value;
+  localStorage.setItem('item-locale', activeLocale);
+  load().catch((err) => alert(err.message));
+});
 
 document.getElementById('logout').addEventListener('click', async () => {
   try {
