@@ -16,6 +16,8 @@ function formField(name) {
 
 const collapsed = new Set(JSON.parse(localStorage.getItem('collapsed') || '[]'));
 let tree = [];
+// Server chỉ cho admin xoá mục; ẩn nút để người dùng thường không bấm rồi nhận lỗi 403
+let isAdmin = false;
 
 function saveCollapsed() {
   localStorage.setItem('collapsed', JSON.stringify([...collapsed]));
@@ -125,7 +127,8 @@ async function loadCurrentUser() {
   const data = await res.json();
   if (!res.ok) throw new Error(data.error || 'Không lấy được tài khoản đăng nhập');
   document.getElementById('current-user').textContent = data.user.username;
-  document.getElementById('manage-users').hidden = data.user.role !== 'admin';
+  isAdmin = data.user.role === 'admin';
+  document.getElementById('manage-users').hidden = !isAdmin;
   return true;
 }
 
@@ -222,14 +225,16 @@ function renderNode(item, query) {
     ops.append(button);
   }
 
-  const del = el('button', { className: 'del', textContent: '✕', title: 'Xoá mục' });
-  del.addEventListener('click', () => {
-    const warning = hasChildren ? `\n\nCả ${item.children.length} mục con cũng bị xoá.` : '';
-    if (confirm(`Xoá "${item.name}"?${warning}`)) {
-      run(() => api(`/${item.id}`, { method: 'DELETE' }));
-    }
-  });
-  ops.append(del);
+  if (isAdmin) {
+    const del = el('button', { className: 'del', textContent: '✕', title: 'Xoá mục' });
+    del.addEventListener('click', () => {
+      const warning = hasChildren ? `\n\nCả ${item.children.length} mục con cũng bị xoá.` : '';
+      if (confirm(`Xoá "${item.name}"?${warning}`)) {
+        run(() => api(`/${item.id}`, { method: 'DELETE' }));
+      }
+    });
+    ops.append(del);
+  }
   parts.push(ops);
 
   const row = el('div', {
@@ -399,6 +404,19 @@ localeEl.addEventListener('change', () => {
   localStorage.setItem('item-locale', activeLocale);
   load().catch((err) => alert(err.message));
 });
+
+// Socket.IO: nhận thông báo real-time
+try {
+  const socket = io();
+  socket.on('notification', (n) => {
+    const node = document.createElement('div');
+    node.className = 'alert notification';
+    node.textContent = n.message;
+    alertsEl.prepend(node);
+  });
+} catch (err) {
+  // Nếu socket.io không có sẵn, bỏ qua
+}
 
 document.getElementById('logout').addEventListener('click', async () => {
   try {

@@ -2,14 +2,39 @@ import { Router } from 'express';
 import { db, tx, NOW } from '../db.js';
 import { DEFAULT_LOCALE, canonicalizeLocale, requestedLocale } from '../locale.js';
 import { recordTransaction } from './transactions.js';
+import { requireAdmin } from '../auth.js';
+import { parseDate } from '../validation.js';
 
 const router = Router();
 
-const selectAll = db.prepare('SELECT * FROM items ORDER BY position, id');
-const selectOne = db.prepare('SELECT * FROM items WHERE id = ?');
-const selectAllTranslations = db.prepare(
-  'SELECT item_id, locale, name, note FROM item_translations ORDER BY locale'
+// Mục đã xoá (archived_at khác NULL) chỉ còn để giữ lịch sử giao dịch, mọi API coi như không tồn tại
+const selectAll = db.prepare('SELECT * FROM items WHERE archived_at IS NULL ORDER BY position, id');
+const selectOne = db.prepare('SELECT * FROM items WHERE id = ? AND archived_at IS NULL');
+const selectSubtree = db.prepare(`
+  WITH RECURSIVE subtree(id) AS (
+    SELECT ?
+    UNION ALL
+    SELECT i.id FROM items i JOIN subtree s ON i.parent_id = s.id WHERE i.archived_at IS NULL
+  )
+  SELECT items.id, items.quantity FROM items JOIN subtree USING (id)
+`);
+const selectSubtreeRows = db.prepare(`
+  WITH RECURSIVE subtree(id) AS (
+    SELECT id FROM items WHERE id = ? AND archived_at IS NULL
+    UNION ALL
+    SELECT i.id FROM items i JOIN subtree s ON i.parent_id = s.id WHERE i.archived_at IS NULL
+  )
+  SELECT items.* FROM items JOIN subtree USING (id) ORDER BY position, id
+`);
+const archiveItem = db.prepare(
+  `UPDATE items SET archived_at = ${NOW}, updated_at = ${NOW} WHERE id = ?`
 );
+// Chỉ đọc bản dịch của các mục sắp trả về: POST/PATCH trả một mục thì không phải đọc cả bảng
+const selectTranslationsOf = db.prepare(`
+  SELECT item_id, locale, name, note FROM item_translations
+  WHERE item_id IN (SELECT value FROM json_each(?))
+  ORDER BY locale
+`);
 const selectTranslation = db.prepare(
   'SELECT name, note FROM item_translations WHERE item_id = ? AND locale = ?'
 );
@@ -17,7 +42,6 @@ const insertItem = db.prepare(`
   INSERT INTO items (parent_id, name, quantity, unit, expires_at, note, position, unit_price, min_quantity)
   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 `);
-const deleteItem = db.prepare('DELETE FROM items WHERE id = ?');
 const nextPosition = db.prepare(
   'SELECT COALESCE(MAX(position) + 1, 0) AS pos FROM items WHERE parent_id IS ?'
 );
@@ -105,7 +129,8 @@ function applyTranslationChanges(itemId, changes) {
 
 function formatRows(rows, locale = null) {
   const byItem = new Map();
-  for (const translation of selectAllTranslations.all()) {
+  const ids = JSON.stringify(rows.map((row) => row.id));
+  for (const translation of selectTranslationsOf.all(ids)) {
     let translations = byItem.get(translation.item_id);
     if (!translations) {
       translations = {};
@@ -192,13 +217,7 @@ function parseFields(body, { partial }) {
 
   if (body.expires_at !== undefined) {
     const value = body.expires_at;
-    if (value === null || value === '') {
-      fields.expires_at = null;
-    } else if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value)) {
-      fields.expires_at = value;
-    } else {
-      throw Object.assign(new Error('"expires_at" phải có dạng YYYY-MM-DD'), { status: 400 });
-    }
+    fields.expires_at = value === null || value === '' ? null : parseDate(value, 'expires_at');
   }
 
   return fields;
@@ -231,7 +250,8 @@ router.get('/expiring', (req, res, next) => {
     const rows = db
       .prepare(
         `SELECT * FROM items
-         WHERE expires_at IS NOT NULL
+         WHERE archived_at IS NULL
+           AND expires_at IS NOT NULL
            AND date(expires_at) <= date('now', 'localtime', '+' || ? || ' days')
          ORDER BY expires_at`
       )
@@ -244,13 +264,11 @@ router.get('/expiring', (req, res, next) => {
 
 router.get('/:id', (req, res, next) => {
   try {
-    const item = selectOne.get(Number(req.params.id));
-    if (!item) return res.status(404).json({ error: 'Mục không tồn tại' });
-    const rows = formatRows(selectAll.all(), requestedLocale(req));
-    const node = buildTree(rows).flatMap(function flatten(n) {
-      return [n, ...n.children.flatMap(flatten)];
-    }).find((n) => n.id === item.id);
-    res.json(node);
+    const id = Number(req.params.id);
+    const rows = selectSubtreeRows.all(id);
+    if (rows.length === 0) return res.status(404).json({ error: 'Mục không tồn tại' });
+    // Cha của mục gốc không nằm trong rows nên buildTree đặt nó làm gốc duy nhất
+    res.json(buildTree(formatRows(rows, requestedLocale(req)))[0]);
   } catch (err) {
     next(err);
   }
@@ -384,13 +402,36 @@ router.post('/:id/adjust', (req, res, next) => {
   }
 });
 
-router.delete('/:id', (req, res) => {
-  const id = Number(req.params.id);
-  const item = selectOne.get(id);
-  if (!item) return res.status(404).json({ error: 'Mục không tồn tại' });
-  const response = formatOne(item);
-  deleteItem.run(id);
-  res.json(response);
+// Không xoá hẳn: ON DELETE CASCADE sẽ xoá luôn giao dịch và dòng phiếu, làm biểu đồ quá khứ
+// và tổng tiền phiếu sai. Thay vào đó ghi sổ xuất hết tồn còn lại rồi đánh dấu lưu trữ
+// cả nhánh, để tồn kho hôm nay giảm đúng mà các ngày trước vẫn giữ nguyên.
+router.delete('/:id', requireAdmin, (req, res, next) => {
+  try {
+    const id = Number(req.params.id);
+    const item = selectOne.get(id);
+    if (!item) return res.status(404).json({ error: 'Mục không tồn tại' });
+    const response = formatOne(item);
+
+    tx(() => {
+      for (const node of selectSubtree.all(id)) {
+        if (node.quantity > 0) {
+          recordTransaction({
+            itemId: node.id,
+            delta: -node.quantity,
+            source: 'adjust',
+            note: 'Xoá mục',
+            user: req.user,
+            notify: false,
+          });
+        }
+        archiveItem.run(node.id);
+      }
+    });
+
+    res.json(response);
+  } catch (err) {
+    next(err);
+  }
 });
 
 export default router;

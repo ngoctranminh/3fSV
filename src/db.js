@@ -3,11 +3,18 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const rootDir = join(dirname(fileURLToPath(import.meta.url)), '..');
-const dbPath = process.env.DB_PATH || join(rootDir, 'data', 'kho.db');
+export const dbPath = process.env.DB_PATH || join(rootDir, 'data', 'kho.db');
 
 export const db = new DatabaseSync(dbPath);
 
 db.exec('PRAGMA foreign_keys = ON');
+// WAL cho phép đọc trong lúc đang ghi (backup, script seed chạy song song với server).
+// Lưu ý: khi copy tay file .db phải copy cả kho.db-wal, hoặc dùng backup tự động.
+if (dbPath !== ':memory:') db.exec('PRAGMA journal_mode = WAL');
+db.exec('PRAGMA busy_timeout = 5000');
+
+const columnsOf = (table) =>
+  new Set(db.prepare(`PRAGMA table_info(${table})`).all().map((column) => column.name));
 
 // Mọi mốc thời gian dùng giờ địa phương (theo TZ của hệ điều hành, hiện là Europe/Prague).
 // Biểu đồ phải nhóm theo ngày địa phương, và trộn UTC với localtime giữa các bảng
@@ -31,9 +38,7 @@ db.exec(`
 
 db.exec('CREATE INDEX IF NOT EXISTS idx_items_parent ON items(parent_id)');
 
-const itemColumns = new Set(
-  db.prepare('PRAGMA table_info(items)').all().map((column) => column.name)
-);
+const itemColumns = columnsOf('items');
 for (const [name, declaration] of [
   ['unit_price', 'REAL NOT NULL DEFAULT 0'],
   ['min_quantity', 'REAL NOT NULL DEFAULT 0'],
@@ -190,10 +195,7 @@ db.exec('CREATE INDEX IF NOT EXISTS idx_doc_lines_doc ON document_lines(document
 // Không thêm 'document' vào CHECK của transactions.source: document_id IS NOT NULL đã đủ,
 // và đổi CHECK bắt buộc dựng lại bảng vì ALTER TABLE ADD CONSTRAINT của SQLite im lặng
 // không có tác dụng
-const txColumns = new Set(
-  db.prepare('PRAGMA table_info(transactions)').all().map((column) => column.name)
-);
-if (!txColumns.has('document_id')) {
+if (!columnsOf('transactions').has('document_id')) {
   db.exec('ALTER TABLE transactions ADD COLUMN document_id INTEGER REFERENCES documents(id)');
 }
 db.exec('CREATE INDEX IF NOT EXISTS idx_tx_document ON transactions(document_id)');
@@ -210,19 +212,14 @@ db.exec(`
   )
 `);
 
-const userColumns = new Set(
-  db.prepare('PRAGMA table_info(users)').all().map((column) => column.name)
-);
-if (!userColumns.has('role')) {
+if (!columnsOf('users').has('role')) {
   db.exec("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user' CHECK (role IN ('admin', 'user'))");
 }
 
 // Gắn người thao tác vào từng lần nhập/xuất. username là bản chụp để lịch sử vẫn
 // đọc được sau khi tài khoản bị đổi tên hoặc xoá; các giao dịch cũ để NULL vì không
 // thể suy ra chính xác người đã thực hiện.
-const transactionActorColumns = new Set(
-  db.prepare('PRAGMA table_info(transactions)').all().map((column) => column.name)
-);
+const transactionActorColumns = columnsOf('transactions');
 if (!transactionActorColumns.has('user_id')) {
   db.exec('ALTER TABLE transactions ADD COLUMN user_id INTEGER REFERENCES users(id) ON DELETE SET NULL');
 }
@@ -244,12 +241,79 @@ db.exec(`
 db.exec('CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id)');
 db.exec('CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at)');
 
+db.exec(`
+  CREATE TABLE IF NOT EXISTS notifications (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id    INTEGER REFERENCES users(id) ON DELETE CASCADE,
+    message    TEXT    NOT NULL,
+    metadata   TEXT    NOT NULL DEFAULT '{}',
+    created_at TEXT    NOT NULL DEFAULT (${NOW})
+  )
+`);
+db.exec('CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id)');
+
+// Thông báo chung (user_id NULL) gửi cho mọi người, nên "đã đọc" phải lưu theo từng người
+db.exec(`
+  CREATE TABLE IF NOT EXISTS notification_reads (
+    notification_id INTEGER NOT NULL REFERENCES notifications(id) ON DELETE CASCADE,
+    user_id         INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    read_at         TEXT    NOT NULL DEFAULT (${NOW}),
+    PRIMARY KEY (notification_id, user_id)
+  )
+`);
+
+// Thay đổi schema từ đây trở đi đặt vào MIGRATIONS thay vì thêm khối if mới ở trên.
+// Mỗi phần tử chạy đúng một lần theo thứ tự, PRAGMA user_version ghi số đã chạy.
+// Chỉ thêm vào cuối, không sửa hay xoá migration đã chạy trên DB thật.
+const MIGRATIONS = [
+  // 1: xoá mục chuyển thành lưu trữ, vì xoá hẳn kéo theo xoá giao dịch (ON DELETE CASCADE)
+  // làm biểu đồ quá khứ và tổng tiền của phiếu bị sai
+  () => {
+    if (!columnsOf('items').has('archived_at')) {
+      db.exec('ALTER TABLE items ADD COLUMN archived_at TEXT');
+    }
+  },
+  // 2: cột read dùng chung cho mọi người đã thay bằng bảng notification_reads
+  () => {
+    if (columnsOf('notifications').has('read')) {
+      db.exec('DROP INDEX IF EXISTS idx_notifications_read');
+      db.exec('ALTER TABLE notifications DROP COLUMN read');
+    }
+  },
+];
+
+const appliedMigrations = db.prepare('PRAGMA user_version').get().user_version;
+for (let version = appliedMigrations + 1; version <= MIGRATIONS.length; version++) {
+  db.exec('BEGIN');
+  try {
+    MIGRATIONS[version - 1]();
+    db.exec(`PRAGMA user_version = ${version}`);
+    db.exec('COMMIT');
+  } catch (err) {
+    db.exec('ROLLBACK');
+    throw new Error(`Migration ${version} thất bại: ${err.message}`, { cause: err });
+  }
+}
+
+// null khi không ở trong tx(); ngược lại là các việc chờ COMMIT xong mới chạy
+let pendingAfterCommit = null;
+
+// Việc có tác dụng ra ngoài DB (gửi socket...) phải chờ COMMIT: nếu chạy ngay mà
+// transaction bị ROLLBACK thì người dùng nhận thông báo về giao dịch không tồn tại
+export function afterCommit(fn) {
+  if (pendingAfterCommit) pendingAfterCommit.push(fn);
+  else fn();
+}
+
 // SQLite không có transaction lồng nhau nên tx() không được gọi bên trong tx()
 export function tx(fn) {
   db.exec('BEGIN');
+  pendingAfterCommit = [];
+  let callbacks;
   try {
     const result = fn();
     db.exec('COMMIT');
+    callbacks = pendingAfterCommit;
     return result;
   } catch (err) {
     // Nếu không có transaction nào đang mở, ROLLBACK sẽ throw và che mất lỗi gốc
@@ -257,6 +321,16 @@ export function tx(fn) {
       db.exec('ROLLBACK');
     } catch {}
     throw err;
+  } finally {
+    pendingAfterCommit = null;
+    // Dữ liệu đã commit, nên lỗi ở đây chỉ ghi log chứ không được làm request thất bại
+    for (const callback of callbacks ?? []) {
+      try {
+        callback();
+      } catch (err) {
+        console.error('Lỗi khi chạy việc sau COMMIT', err);
+      }
+    }
   }
 }
 

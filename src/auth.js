@@ -1,10 +1,14 @@
 import {
   createHash,
   randomBytes,
+  scrypt,
   scryptSync,
   timingSafeEqual,
 } from 'node:crypto';
+import { promisify } from 'node:util';
 import { db, NOW, tx } from './db.js';
+
+const scryptAsync = promisify(scrypt);
 
 const COOKIE_NAME = 'warehouse_session';
 const SESSION_TTL_SECONDS = 7 * 24 * 60 * 60;
@@ -14,7 +18,7 @@ const findUserByUsername = db.prepare(
   'SELECT id, username, password_salt, password_hash, role FROM users WHERE username = ?'
 );
 const findSession = db.prepare(`
-  SELECT u.id, u.username, u.role
+  SELECT u.id, u.username, u.role, s.expires_at
   FROM sessions s JOIN users u ON u.id = s.user_id
   WHERE s.token_hash = ? AND s.expires_at > ?
 `);
@@ -22,6 +26,7 @@ const insertSession = db.prepare(
   'INSERT INTO sessions (token_hash, user_id, expires_at) VALUES (?, ?, ?)'
 );
 const deleteSession = db.prepare('DELETE FROM sessions WHERE token_hash = ?');
+const extendSession = db.prepare('UPDATE sessions SET expires_at = ? WHERE token_hash = ?');
 const deleteExpiredSessions = db.prepare('DELETE FROM sessions WHERE expires_at <= ?');
 
 function hashToken(token) {
@@ -127,11 +132,17 @@ export function bootstrapUsersFromEnv() {
   });
 }
 
-export function verifyCredentials(username, password) {
-  const user = findUserByUsername.get(username);
-  if (!user || typeof password !== 'string') return null;
+// Salt giả cho tài khoản không tồn tại: vẫn băm như thường để thời gian phản hồi
+// không cho biết tên tài khoản nào có thật
+const DUMMY_SALT = randomBytes(16).toString('hex');
 
-  const actual = scryptSync(password, user.password_salt, PASSWORD_KEY_LENGTH);
+// Bất đồng bộ vì scrypt mất vài chục ms; bản Sync chặn mọi request khác trong lúc băm
+export async function verifyCredentials(username, password) {
+  if (typeof password !== 'string') return null;
+  const user = findUserByUsername.get(username);
+
+  const actual = await scryptAsync(password, user?.password_salt ?? DUMMY_SALT, PASSWORD_KEY_LENGTH);
+  if (!user) return null;
   const expected = Buffer.from(user.password_hash, 'hex');
   if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) return null;
   return { id: user.id, username: user.username, role: user.role };
@@ -139,12 +150,16 @@ export function verifyCredentials(username, password) {
 
 export function createSession(userId) {
   const now = Math.floor(Date.now() / 1000);
-  deleteExpiredSessions.run(now);
-
   const token = randomBytes(32).toString('base64url');
   const expiresAt = now + SESSION_TTL_SECONDS;
   insertSession.run(hashToken(token), userId, expiresAt);
   return { token, expiresAt };
+}
+
+// Phiên hết hạn đã bị findSession từ chối, xoá chỉ để bảng không phình. Chạy theo lịch
+// (maintenance.js) thay vì lúc đăng nhập, vì có khi nhiều ngày không ai đăng nhập lại.
+export function pruneExpiredSessions() {
+  return deleteExpiredSessions.run(Math.floor(Date.now() / 1000)).changes;
 }
 
 export function destroySession(req) {
@@ -171,17 +186,35 @@ export function clearSessionCookie(res) {
   });
 }
 
+// Dùng cho Socket.IO: handshake là request HTTP thường nên đọc được cùng cookie phiên.
+// Không gia hạn phiên ở đây vì handshake không có response để gửi lại cookie mới.
+export function userFromRequest(req) {
+  const token = readCookie(req, COOKIE_NAME);
+  const session = token ? findSession.get(hashToken(token), Math.floor(Date.now() / 1000)) : null;
+  if (!session) return null;
+  const { expires_at: _expiresAt, ...user } = session;
+  return user;
+}
+
 export function requireAuth(req, res, next) {
   const token = readCookie(req, COOKIE_NAME);
-  const user = token
-    ? findSession.get(hashToken(token), Math.floor(Date.now() / 1000))
-    : null;
+  const now = Math.floor(Date.now() / 1000);
+  const session = token ? findSession.get(hashToken(token), now) : null;
 
-  if (!user) {
+  if (!session) {
     clearSessionCookie(res);
     return res.status(401).json({ error: 'Bạn cần đăng nhập' });
   }
 
+  // Phiên trượt: còn dưới nửa TTL thì gia hạn, để người dùng thường xuyên
+  // không bị đăng xuất đúng 7 ngày sau lần đăng nhập đầu.
+  if (session.expires_at - now < SESSION_TTL_SECONDS / 2) {
+    const expiresAt = now + SESSION_TTL_SECONDS;
+    extendSession.run(expiresAt, hashToken(token));
+    setSessionCookie(res, token, expiresAt);
+  }
+
+  const { expires_at: _expiresAt, ...user } = session;
   req.user = user;
   next();
 }

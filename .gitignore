@@ -4,3 +4,4 @@ data/
 *.log
 MO-CLAUDE-VSCODE.command
 .claude/
+.DS_Store

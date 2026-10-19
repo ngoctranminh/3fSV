@@ -11,13 +11,15 @@ const selectTotals = db.prepare(`
          COALESCE(SUM(quantity * unit_price), 0) AS total_value,
          COALESCE(SUM(min_quantity > 0 AND quantity <= min_quantity), 0) AS low_stock_count
   FROM items
+  WHERE archived_at IS NULL
 `);
 
 const selectExpiringCounts = db.prepare(`
   SELECT COALESCE(SUM(date(expires_at) < date('now', 'localtime')), 0) AS overdue_count,
          COALESCE(SUM(date(expires_at) >= date('now', 'localtime')), 0) AS expiring_count
   FROM items
-  WHERE expires_at IS NOT NULL
+  WHERE archived_at IS NULL
+    AND expires_at IS NOT NULL
     AND date(expires_at) <= date('now', 'localtime', '+' || ? || ' days')
 `);
 
@@ -52,36 +54,59 @@ const selectAlerts = db.prepare(`
            ELSE 'expiring'
          END AS kind
   FROM items i JOIN path ON path.id = i.id
-  WHERE (i.min_quantity > 0 AND i.quantity <= i.min_quantity)
-     OR (i.expires_at IS NOT NULL
-         AND date(i.expires_at) <= date('now', 'localtime', '+' || ? || ' days'))
+  WHERE i.archived_at IS NULL
+    AND ((i.min_quantity > 0 AND i.quantity <= i.min_quantity)
+      OR (i.expires_at IS NOT NULL
+          AND date(i.expires_at) <= date('now', 'localtime', '+' || ? || ' days')))
 `);
 
 const selectAlertCount = db.prepare(`
   SELECT COUNT(*) AS alert_count FROM items
-  WHERE (min_quantity > 0 AND quantity <= min_quantity)
-     OR (expires_at IS NOT NULL
-         AND date(expires_at) <= date('now', 'localtime', '+' || ? || ' days'))
+  WHERE archived_at IS NULL
+    AND ((min_quantity > 0 AND quantity <= min_quantity)
+      OR (expires_at IS NOT NULL
+          AND date(expires_at) <= date('now', 'localtime', '+' || ? || ' days')))
 `);
 
-// Ngày nào có snapshot thì đọc snapshot, ngày nào không thì tính lùi từ tồn kho hiện tại
+// Ngày nào có snapshot thì đọc snapshot, ngày nào không thì tính lùi từ tồn kho hiện tại:
+// giá trị cuối ngày d = giá trị hiện tại - tổng biến động của mọi giao dịch sau ngày d.
+// Gom biến động theo ngày một lần rồi cộng dồn bằng window function, thay vì mỗi ngày quét
+// lại cả bảng transactions (365 ngày là 365 lần quét). Giao dịch ghi ngày sau hôm nay
+// không nằm trong days nên cộng riêng qua later.
 const selectHistory = db.prepare(`
   WITH RECURSIVE days(d) AS (
-    SELECT date('now', 'localtime', '-' || ? || ' days')
+    SELECT date('now', 'localtime', '-' || :offset || ' days')
     UNION ALL
     SELECT date(d, '+1 day') FROM days WHERE d < date('now', 'localtime')
+  ),
+  daily(d, delta) AS (
+    SELECT date(t.occurred_at), SUM(${signedDeltaSql('t.')} * i.unit_price)
+    FROM transactions t JOIN items i ON i.id = t.item_id
+    -- So chuỗi để dùng idx_tx_occurred; ngày đầu tiên không cần biến động của chính nó
+    WHERE t.occurred_at >= date('now', 'localtime', '-' || :offset || ' days', '+1 day')
+    GROUP BY 1
+  ),
+  later(delta) AS (
+    SELECT COALESCE(SUM(delta), 0) FROM daily WHERE d > date('now', 'localtime')
   )
   SELECT days.d AS date,
          s.total_value AS snapshot_value,
          days.d = date('now', 'localtime') AS is_today,
-         COALESCE((
-           SELECT SUM(${signedDeltaSql('t.')} * i.unit_price)
-           FROM transactions t JOIN items i ON i.id = t.item_id
-           WHERE date(t.occurred_at) > days.d
+         (SELECT delta FROM later) + COALESCE(SUM(daily.delta) OVER (
+           ORDER BY days.d DESC ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
          ), 0) AS future_delta
-  FROM days LEFT JOIN daily_snapshots s ON s.date = days.d
+  FROM days
+  LEFT JOIN daily ON daily.d = days.d
+  LEFT JOIN daily_snapshots s ON s.date = days.d
   ORDER BY days.d
 `);
+
+// Gọi theo lịch (maintenance.js) thay vì trong GET /summary, để ngày không ai mở app
+// vẫn có snapshot. Ghi đè trong ngày nên lần chạy cuối ngày là giá trị cuối ngày.
+export function recordDailySnapshot() {
+  const totals = selectTotals.get();
+  upsertSnapshot.run(totals.total_value, totals.total_items, totals.low_stock_count);
+}
 
 function toVnDate(value) {
   const [year, month, day] = value.slice(0, 10).split('-');
@@ -135,8 +160,6 @@ router.get('/summary', (req, res, next) => {
     // Một mục có thể vừa sắp hết vừa sắp hết hạn, nên đếm số dòng thay vì cộng ba số
     const { alert_count } = selectAlertCount.get(EXPIRING_DAYS);
 
-    upsertSnapshot.run(totals.total_value, totals.total_items, totals.low_stock_count);
-
     res.json({
       ...totals,
       expiring_count,
@@ -158,12 +181,12 @@ router.get('/stats/value-history', (req, res, next) => {
     }
 
     const { total_value } = selectTotals.get();
-    const rows = selectHistory.all(days - 1);
+    const rows = selectHistory.all({ offset: days - 1 });
 
     res.json(
       rows.map((row) => ({
         date: row.date,
-          value:
+        value:
           row.snapshot_value === null || row.is_today
             ? Math.round((total_value - row.future_delta) * 100) / 100
             : row.snapshot_value,

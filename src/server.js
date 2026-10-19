@@ -1,18 +1,28 @@
 import express from 'express';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { bootstrapUsersFromEnv, requireAuth } from './auth.js';
+import http from 'node:http';
+import { Server as IOServer } from 'socket.io';
+import { bootstrapUsersFromEnv, requireAuth, userFromRequest } from './auth.js';
+import { init as initNotifications } from './notifications.js';
+import { startMaintenance } from './maintenance.js';
+import { db } from './db.js';
 import authRouter from './routes/auth.js';
 import itemsRouter from './routes/items.js';
 import transactionsRouter from './routes/transactions.js';
 import documentsRouter from './routes/documents.js';
 import statsRouter from './routes/stats.js';
 import usersRouter from './routes/users.js';
+import notificationsRouter from './routes/notifications.js';
 
 const rootDir = join(dirname(fileURLToPath(import.meta.url)), '..');
 const app = express();
 const PORT = process.env.PORT || 3000;
 const bootstrappedUsers = bootstrapUsersFromEnv();
+
+// `tailscale serve` chạy trên cùng máy và chuyển tiếp request, nên chỉ tin
+// X-Forwarded-For từ loopback để req.ip là IP thật (dùng cho giới hạn đăng nhập)
+app.set('trust proxy', 'loopback');
 
 if (bootstrappedUsers.length > 0) {
   console.log(`Đã khởi tạo ${bootstrappedUsers.length} tài khoản ban đầu.`);
@@ -42,6 +52,7 @@ app.get('/health', (req, res) => {
 app.use('/api/auth', authRouter);
 app.use('/api', requireAuth);
 app.use('/api/users', usersRouter);
+app.use('/api/notifications', notificationsRouter);
 app.use('/api/items', itemsRouter);
 app.use('/api/transactions', transactionsRouter);
 app.use('/api/documents', documentsRouter);
@@ -52,10 +63,42 @@ app.use((req, res) => {
 });
 
 app.use((err, req, res, next) => {
-  console.error(err);
-  res.status(err.status || 500).json({ error: err.message || 'Internal Server Error' });
+  const status = err.status || err.statusCode || 500;
+  // Lỗi 500 là lỗi không lường trước (thường từ SQLite); message có thể lộ câu SQL
+  // hay đường dẫn file nên chỉ ghi log, còn client nhận thông báo chung
+  if (status >= 500) console.error(err);
+  res.status(status).json({ error: status >= 500 ? 'Lỗi máy chủ' : err.message });
 });
 
-app.listen(PORT, () => {
-  console.log(`Server đang chạy tại http://localhost:${PORT}`);
+// Tạo HTTP server để có thể gắn Socket.IO
+const server = http.createServer(app);
+const io = new IOServer(server);
+
+// Thông báo chứa tên hàng và số tồn, nên socket phải đăng nhập như /api
+io.use((socket, next) => {
+  const user = userFromRequest(socket.request);
+  if (!user) return next(new Error('Bạn cần đăng nhập'));
+  socket.data.user = user;
+  next();
 });
+
+initNotifications(io);
+
+server.listen(PORT, () => {
+  console.log(`Server đang chạy tại http://localhost:${PORT}`);
+  startMaintenance();
+});
+
+// launchd/Ctrl+C gửi tín hiệu dừng: đóng DB đàng hoàng để SQLite gộp WAL vào kho.db
+function shutdown(signal) {
+  console.log(`Nhận ${signal}, đang dừng server...`);
+  // io.close() đóng luôn HTTP server mà nó gắn vào
+  io.close(() => {
+    db.close();
+    process.exit(0);
+  });
+  // Kết nối keep-alive có thể giữ server.close() mãi; quá 5 giây thì thoát luôn
+  setTimeout(() => process.exit(0), 5000).unref();
+}
+process.once('SIGTERM', shutdown);
+process.once('SIGINT', shutdown);

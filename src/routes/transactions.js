@@ -1,12 +1,18 @@
 import { Router } from 'express';
 import { db, tx, signedDeltaSql, NOW } from '../db.js';
+import { createNotification } from '../notifications.js';
+import { requireAdmin } from '../auth.js';
+import { fail, parseOccurredAt } from '../validation.js';
 
 const router = Router();
 
 const selectItem = db.prepare('SELECT * FROM items WHERE id = ?');
 const selectOne = db.prepare(`
-  SELECT t.*, i.name AS item_name, i.unit AS item_unit
-  FROM transactions t JOIN items i ON i.id = t.item_id
+  SELECT t.*, i.name AS item_name, i.unit AS item_unit,
+         i.archived_at AS item_archived_at, d.code AS document_code
+  FROM transactions t
+  JOIN items i ON i.id = t.item_id
+  LEFT JOIN documents d ON d.id = t.document_id
   WHERE t.id = ?
 `);
 const insertTx = db.prepare(`
@@ -21,10 +27,6 @@ const setQuantity = db.prepare(
 const setQuantityAndPrice = db.prepare(
   `UPDATE items SET quantity = ?, unit_price = ?, updated_at = ${NOW} WHERE id = ?`
 );
-
-function fail(message, status = 400) {
-  return Object.assign(new Error(message), { status });
-}
 
 export function signedDelta(row) {
   return row.kind === 'in' ? row.quantity : -row.quantity;
@@ -41,9 +43,10 @@ export function recordTransaction({
   occurredAt = null,
   documentId = null,
   user = null,
+  notify = true,
 }) {
   const item = selectItem.get(itemId);
-  if (!item) throw fail('Mục không tồn tại', 404);
+  if (!item || item.archived_at) throw fail('Mục không tồn tại', 404);
 
   // Làm tròn để phép cộng dồn số thực không tích luỹ rác kiểu 0.20000000000000284
   const quantity = Math.round((item.quantity + delta) * 1e6) / 1e6;
@@ -76,7 +79,35 @@ export function recordTransaction({
     setQuantity.run(quantity, itemId);
   }
 
+  // Chỉ báo lúc vừa vượt xuống ngưỡng, không báo lại mỗi lần xuất khi đã ở dưới ngưỡng.
+  // Dùng <= cho khớp với cảnh báo "sắp hết" trong stats.js
+  const min = item.min_quantity;
+  if (notify && min > 0 && item.quantity > min && quantity <= min) {
+    try {
+      createNotification({
+        message: `Sắp hết: "${item.name}" còn ${quantity}${item.unit ? ` ${item.unit}` : ''}`,
+        metadata: { item_id: itemId, quantity, min_quantity: min },
+      });
+    } catch (err) {
+      console.error('Không tạo được thông báo', err);
+    }
+  }
+
   return Number(lastInsertRowid);
+}
+
+// Giao dịch của phiếu phải đi qua huỷ phiếu, nếu không dòng phiếu và tổng tiền phiếu
+// sẽ lệch khỏi sổ giao dịch. Mục đã xoá thì không cho đổi tồn kho nữa.
+function assertEditable(existing) {
+  if (existing.document_id !== null) {
+    throw fail(
+      `Giao dịch này thuộc phiếu ${existing.document_code ?? `#${existing.document_id}`}. Hãy huỷ phiếu thay vì sửa từng giao dịch.`,
+      409
+    );
+  }
+  if (existing.item_archived_at) {
+    throw fail(`Mục "${existing.item_name}" đã bị xoá nên không sửa được giao dịch của nó`, 409);
+  }
 }
 
 function parseQuantity(value) {
@@ -100,14 +131,6 @@ function parseUnitPrice(value) {
     throw fail('"unit_price" phải là số không âm');
   }
   return price;
-}
-
-function parseOccurredAt(value) {
-  if (value === null || value === '') return null;
-  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}([ T]\d{2}:\d{2}(:\d{2})?)?$/.test(value)) {
-    throw fail('"occurred_at" phải có dạng YYYY-MM-DD hoặc YYYY-MM-DD HH:MM:SS');
-  }
-  return value.replace('T', ' ');
 }
 
 router.get('/', (req, res, next) => {
@@ -147,12 +170,13 @@ router.get('/', (req, res, next) => {
       params.push(username);
     }
     if (req.query.from !== undefined) {
-      conditions.push('date(t.occurred_at) >= date(?)');
-      params.push(parseOccurredAt(req.query.from));
+      // Không bọc cột trong date() để dùng được idx_tx_occurred; "<= ngày X" thành "< X + 1 ngày"
+      conditions.push('t.occurred_at >= date(?)');
+      params.push(parseOccurredAt(req.query.from, 'from'));
     }
     if (req.query.to !== undefined) {
-      conditions.push('date(t.occurred_at) <= date(?)');
-      params.push(parseOccurredAt(req.query.to));
+      conditions.push("t.occurred_at < date(?, '+1 day')");
+      params.push(parseOccurredAt(req.query.to, 'to'));
     }
 
     const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
@@ -224,14 +248,15 @@ router.patch('/:id', (req, res, next) => {
     const id = Number(req.params.id);
     const existing = selectOne.get(id);
     if (!existing) throw fail('Giao dịch không tồn tại', 404);
+    assertEditable(existing);
 
     const body = req.body ?? {};
     const kind = body.kind === undefined ? existing.kind : parseKind(body.kind);
     const quantity = body.quantity === undefined ? existing.quantity : parseQuantity(body.quantity);
     const unitPrice =
       body.unit_price === undefined ? existing.unit_price : parseUnitPrice(body.unit_price);
-    const occurredAt =
-      body.occurred_at === undefined ? existing.occurred_at : parseOccurredAt(body.occurred_at);
+    // Để trống thì giữ ngày cũ: cột occurred_at là NOT NULL
+    const occurredAt = parseOccurredAt(body.occurred_at) ?? existing.occurred_at;
     const note = body.note === undefined ? existing.note : String(body.note).trim();
 
     const nextDelta = kind === 'in' ? quantity : -quantity;
@@ -259,11 +284,12 @@ router.patch('/:id', (req, res, next) => {
   }
 });
 
-router.delete('/:id', (req, res, next) => {
+router.delete('/:id', requireAdmin, (req, res, next) => {
   try {
     const id = Number(req.params.id);
     const existing = selectOne.get(id);
     if (!existing) throw fail('Giao dịch không tồn tại', 404);
+    assertEditable(existing);
 
     tx(() => {
       const item = selectItem.get(existing.item_id);
@@ -290,6 +316,7 @@ router.post('/:id/undo', (req, res, next) => {
     const id = Number(req.params.id);
     const existing = selectOne.get(id);
     if (!existing) throw fail('Giao dịch không tồn tại', 404);
+    assertEditable(existing);
 
     const newId = tx(() =>
       recordTransaction({

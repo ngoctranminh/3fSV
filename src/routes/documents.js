@@ -2,6 +2,8 @@ import { Router, raw } from 'express';
 import sharp from 'sharp';
 import { db, tx, NOW } from '../db.js';
 import { recordTransaction } from './transactions.js';
+import { requireAdmin } from '../auth.js';
+import { fail, parseOccurredAt } from '../validation.js';
 
 const router = Router();
 
@@ -37,18 +39,23 @@ const selectDocument = db.prepare(`
   FROM documents d
   WHERE d.id = ?
 `);
+// Đi ngược từ mục của từng dòng lên gốc, thay vì dựng đường dẫn cho mọi mục trong kho
+// rồi mới lọc lấy vài mục của phiếu. Không lọc archived_at: phiếu cũ vẫn hiện mục đã xoá.
 const selectLines = db.prepare(`
-  WITH RECURSIVE path(id, trail) AS (
-    SELECT id, name FROM items WHERE parent_id IS NULL
+  WITH RECURSIVE up(line_id, parent_id, trail) AS (
+    SELECT l.id, i.parent_id, i.name
+    FROM document_lines l JOIN items i ON i.id = l.item_id
+    WHERE l.document_id = :documentId
     UNION ALL
-    SELECT i.id, p.trail || ' / ' || i.name FROM items i JOIN path p ON i.parent_id = p.id
+    SELECT up.line_id, p.parent_id, p.name || ' / ' || up.trail
+    FROM up JOIN items p ON p.id = up.parent_id
   )
-  SELECT l.*, i.name AS item_name, i.unit AS item_unit, path.trail AS item_full_name,
+  SELECT l.*, i.name AS item_name, i.unit AS item_unit, up.trail AS item_full_name,
          ROUND(l.quantity * l.unit_price, 2) AS total_price
   FROM document_lines l
   JOIN items i ON i.id = l.item_id
-  JOIN path ON path.id = l.item_id
-  WHERE l.document_id = ?
+  JOIN up ON up.line_id = l.id AND up.parent_id IS NULL
+  WHERE l.document_id = :documentId
   ORDER BY l.id
 `);
 const insertDocument = db.prepare(`
@@ -63,6 +70,7 @@ const nextSequence = db.prepare(`
   SELECT COALESCE(MAX(CAST(substr(code, 10) AS INTEGER)), 0) + 1 AS seq
   FROM documents WHERE code LIKE ?
 `);
+const setTotalValue = db.prepare('UPDATE documents SET total_value = ? WHERE id = ?');
 const selectTxOfDocument = db.prepare('SELECT * FROM transactions WHERE document_id = ?');
 const deleteTxOfDocument = db.prepare('DELETE FROM transactions WHERE document_id = ?');
 const setItemQuantity = db.prepare(
@@ -80,10 +88,6 @@ const saveImage = db.prepare(`
     created_at = ${NOW}
 `);
 const deleteImage = db.prepare('DELETE FROM document_images WHERE document_id = ?');
-
-function fail(message, status = 400) {
-  return Object.assign(new Error(message), { status });
-}
 
 function toVnDateTime(value) {
   const [date, time = ''] = value.split(' ');
@@ -180,17 +184,23 @@ function parseDataUrl(value, fileName) {
   return validateImage(Buffer.from(encoded, 'base64'), match[1].toLowerCase(), fileName);
 }
 
-function parseOccurredAt(value) {
-  if (value === undefined || value === null || value === '') return null;
-  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}([ T]\d{2}:\d{2}(:\d{2})?)?$/.test(value)) {
-    throw fail('"occurred_at" phải có dạng YYYY-MM-DD hoặc YYYY-MM-DD HH:MM:SS');
-  }
-  return value.replace('T', ' ');
-}
-
 // Người dùng gõ "100%" trong ô tìm kiếm sẽ khớp bừa nếu không thoát ký tự đại diện
 function escapeLike(value) {
   return value.replace(/[\\%_]/g, (char) => `\\${char}`);
+}
+
+// occurred_at luôn bắt đầu bằng YYYY-MM-DD nên so chuỗi với một ngày cho cùng kết quả như
+// date(occurred_at), nhưng không bọc cột trong hàm thì SQLite mới dùng được idx_doc_occurred.
+// "Ngày <= X" viết thành "< X + 1 ngày" vì "2026-10-17 09:00" > "2026-10-17".
+function periodCondition(period, column) {
+  const ranges = {
+    today: `${column} >= date('now', 'localtime') AND ${column} < date('now', 'localtime', '+1 day')`,
+    week: `${column} >= date('now', 'localtime', '-6 days')`,
+    month: `${column} >= date('now', 'localtime', 'start of month')`,
+    all: '1 = 1',
+  };
+  if (!ranges[period]) throw fail('"period" phải là today, week, month hoặc all');
+  return ranges[period];
 }
 
 function buildCode(type, occurredAt) {
@@ -227,21 +237,13 @@ router.get('/parties', (req, res, next) => {
 router.get('/summary', (req, res, next) => {
   try {
     const period = req.query.period ?? 'today';
-    const ranges = {
-      today: "date(occurred_at) = date('now', 'localtime')",
-      week: "date(occurred_at) >= date('now', 'localtime', '-6 days')",
-      month: "date(occurred_at) >= date('now', 'localtime', 'start of month')",
-      all: '1 = 1',
-    };
-    if (!ranges[period]) {
-      throw fail('"period" phải là today, week, month hoặc all');
-    }
+    const range = periodCondition(period, 'occurred_at');
 
     const rows = db
       .prepare(
         `SELECT type, COUNT(*) AS count, COALESCE(SUM(total_value), 0) AS total
          FROM documents
-         WHERE status = 'completed' AND ${ranges[period]}
+         WHERE status = 'completed' AND ${range}
          GROUP BY type`
       )
       .all();
@@ -255,7 +257,8 @@ router.get('/summary', (req, res, next) => {
     res.json({
       ...summary,
       period,
-      date: toVnDateTime(db.prepare(`SELECT date('now', 'localtime') AS d`).get().d),    });
+      date: toVnDateTime(db.prepare(`SELECT date('now', 'localtime') AS d`).get().d),
+    });
   } catch (err) {
     next(err);
   }
@@ -300,23 +303,15 @@ router.get('/', (req, res, next) => {
       params.push(pattern, pattern, pattern);
     }
     if (req.query.period !== undefined && req.query.period !== 'all') {
-      const ranges = {
-        today: "date(d.occurred_at) = date('now', 'localtime')",
-        week: "date(d.occurred_at) >= date('now', 'localtime', '-6 days')",
-        month: "date(d.occurred_at) >= date('now', 'localtime', 'start of month')",
-      };
-      if (!ranges[req.query.period]) {
-        throw fail('"period" phải là today, week, month hoặc all');
-      }
-      conditions.push(ranges[req.query.period]);
+      conditions.push(periodCondition(req.query.period, 'd.occurred_at'));
     }
     if (req.query.from !== undefined) {
-      conditions.push('date(d.occurred_at) >= date(?)');
-      params.push(parseOccurredAt(req.query.from));
+      conditions.push('d.occurred_at >= date(?)');
+      params.push(parseOccurredAt(req.query.from, 'from'));
     }
     if (req.query.to !== undefined) {
-      conditions.push('date(d.occurred_at) <= date(?)');
-      params.push(parseOccurredAt(req.query.to));
+      conditions.push("d.occurred_at < date(?, '+1 day')");
+      params.push(parseOccurredAt(req.query.to, 'to'));
     }
 
     const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
@@ -359,7 +354,10 @@ router.get('/:id/image', (req, res, next) => {
       'Content-Type': image.mime_type,
       'Content-Length': String(data.length),
       'Content-Disposition': `inline; filename*=UTF-8''${fileName}`,
-      'Cache-Control': 'private, no-store',
+      // Cho phép trình duyệt/app giữ ảnh nhưng phải hỏi lại mỗi lần: express tự gắn ETag theo
+      // nội dung nên ảnh không đổi thì trả 304 rỗng, còn ảnh vừa thay qua PUT thì nhận bản mới.
+      // private để proxy dùng chung không lưu ảnh chứng từ.
+      'Cache-Control': 'private, no-cache',
     });
     res.send(data);
   } catch (err) {
@@ -403,7 +401,7 @@ router.get('/:id', (req, res, next) => {
   try {
     const document = selectDocument.get(Number(req.params.id));
     if (!document) throw fail('Phiếu không tồn tại', 404);
-    res.json({ ...decorate(document), lines: selectLines.all(document.id) });
+    res.json({ ...decorate(document), lines: selectLines.all({ documentId: document.id }) });
   } catch (err) {
     next(err);
   }
@@ -425,7 +423,10 @@ router.post('/', async (req, res, next) => {
       const position = index + 1;
       const itemId = Number(line?.item_id);
       if (!Number.isInteger(itemId)) throw fail(`Dòng ${position}: "item_id" phải là số nguyên`);
-      if (!selectItem.get(itemId)) throw fail(`Dòng ${position}: nguyên liệu không tồn tại`, 404);
+      const item = selectItem.get(itemId);
+      if (!item || item.archived_at) {
+        throw fail(`Dòng ${position}: nguyên liệu không tồn tại`, 404);
+      }
 
       const quantity = Number(line.quantity);
       if (!Number.isFinite(quantity) || quantity <= 0) {
@@ -453,15 +454,6 @@ router.post('/', async (req, res, next) => {
     const inputImage = parseDataUrl(body.image, body.image_name);
     const image = inputImage ? await optimizeImage(inputImage) : null;
 
-    const totalValue =
-      Math.round(
-        lines.reduce(
-          (sum, line) =>
-            sum + line.quantity * (line.unitPrice ?? selectItem.get(line.itemId).unit_price),
-          0
-        ) * 100
-      ) / 100;
-
     // Cả phiếu trong một transaction: một dòng lỗi thì không còn phiếu nửa vời
     const id = tx(() => {
       const code = buildCode(meta.type, occurredAt);
@@ -470,19 +462,27 @@ router.post('/', async (req, res, next) => {
         meta.type,
         body.subtype,
         party,
-        totalValue,
+        0,
         note,
         createdBy,
         occurredAt
       );
       const documentId = Number(lastInsertRowid);
 
+      // Dòng không khai giá lấy giá hiện tại của mục, và dùng đúng giá đó cho cả dòng phiếu,
+      // tổng phiếu lẫn giao dịch; ghi 0 vào dòng thì cộng các dòng không ra tổng phiếu.
+      // Đọc giá ngay trước từng dòng chứ không đọc một lần từ đầu: dòng nhập có khai giá
+      // đổi giá vốn của mục, nên dòng sau cùng mục phải thấy giá mới như recordTransaction.
+      let totalValue = 0;
       for (const line of lines) {
-        insertLine.run(documentId, line.itemId, line.quantity, line.unitPrice ?? 0, line.note);
+        const price = line.unitPrice ?? selectItem.get(line.itemId).unit_price;
+        totalValue += line.quantity * price;
+        insertLine.run(documentId, line.itemId, line.quantity, price, line.note);
         recordTransaction({
           itemId: line.itemId,
           delta: meta.type === 'in' ? line.quantity : -line.quantity,
           source: 'manual',
+          // Giữ null khi không khai giá: recordTransaction chỉ cập nhật giá vốn khi có khai giá
           unitPrice: line.unitPrice,
           note: line.note || `${meta.label}${party ? ` — ${party}` : ''}`,
           occurredAt,
@@ -490,18 +490,19 @@ router.post('/', async (req, res, next) => {
           user: req.user,
         });
       }
+      setTotalValue.run(Math.round(totalValue * 100) / 100, documentId);
       if (image) saveImage.run(documentId, image.fileName, image.mimeType, image.data);
       return documentId;
     });
 
     const created = selectDocument.get(id);
-    res.status(201).json({ ...decorate(created), lines: selectLines.all(id) });
+    res.status(201).json({ ...decorate(created), lines: selectLines.all({ documentId: id }) });
   } catch (err) {
     next(err);
   }
 });
 
-router.post('/:id/cancel', (req, res, next) => {
+router.post('/:id/cancel', requireAdmin, (req, res, next) => {
   try {
     const id = Number(req.params.id);
     const document = selectDocument.get(id);
@@ -512,6 +513,10 @@ router.post('/:id/cancel', (req, res, next) => {
       // Không clamp khi tồn xuống âm: clamp làm sổ ghi lệch khỏi tồn kho vĩnh viễn
       for (const transaction of selectTxOfDocument.all(id)) {
         const item = selectItem.get(transaction.item_id);
+        // Trả tồn về một mục đã xoá sẽ tạo ra hàng "ẩn" vẫn được tính vào giá trị kho
+        if (item.archived_at) {
+          throw fail(`Mục "${item.name}" trong phiếu đã bị xoá nên không huỷ được phiếu này`, 409);
+        }
         const delta = transaction.kind === 'in' ? transaction.quantity : -transaction.quantity;
         const nextQuantity = Math.round((item.quantity - delta) * 1e6) / 1e6;
         if (nextQuantity < 0) {
@@ -526,7 +531,7 @@ router.post('/:id/cancel', (req, res, next) => {
     });
 
     const cancelled = selectDocument.get(id);
-    res.json({ ...decorate(cancelled), lines: selectLines.all(id) });
+    res.json({ ...decorate(cancelled), lines: selectLines.all({ documentId: id }) });
   } catch (err) {
     next(err);
   }
